@@ -136,7 +136,17 @@ public enum GhfsStatistic {
 
   /** Delegation token operations */
   DELEGATION_TOKENS_ISSUED(
-      "delegation_tokens_issued", "Count of delegation tokens issued", TYPE_DURATION);
+      "delegation_tokens_issued", "Count of delegation tokens issued", TYPE_DURATION),
+
+  /** Storage provider cache statistics */
+  STORAGE_OBJECT_CACHE_IGNORED(
+      "storage_object_cache_ignored", "Storage object cache was not used", TYPE_COUNTER),
+  STORAGE_OBJECT_CACHE_HIT(
+      "storage_object_cache_hit", "Storage object was reused from cache", TYPE_COUNTER),
+  STORAGE_OBJECT_CACHE_MISS(
+      "storage_object_cache_miss", "New Storage object was created", TYPE_COUNTER),
+  STORAGE_OBJECT_CLOSE_OPERATION(
+      "storage_object_close_operation", "Call of close() on storage object", TYPE_COUNTER);
 
   public static final ImmutableSet<GhfsStatistic> VALUES =
       ImmutableSet.copyOf(EnumSet.allOf(GhfsStatistic.class));

@@ -79,7 +79,12 @@ public class StorageProviderTest {
   public void getStorage_returnsAndCachesNewStorageObject() throws IOException {
     Storage storage =
         storageProvider.getStorage(
-            TEST_CREDENTIALS, TEST_STORAGE_OPTIONS, null, null, TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_CREDENTIALS,
+            TEST_STORAGE_OPTIONS,
+            null,
+            null,
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
 
     assertNotNull(storage);
     assertEquals(storageProvider.cache.size(), 1);
@@ -102,7 +107,8 @@ public class StorageProviderTest {
             disableExperimentOptions,
             null,
             null,
-            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
 
     assertNotNull(storage);
     assertEquals(storageProvider.cache.size(), 0);
@@ -112,10 +118,20 @@ public class StorageProviderTest {
   public void getStorage_returnsCachedStorageObject() throws IOException {
     Storage storage1 =
         storageProvider.getStorage(
-            TEST_CREDENTIALS, TEST_STORAGE_OPTIONS, null, null, TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_CREDENTIALS,
+            TEST_STORAGE_OPTIONS,
+            null,
+            null,
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
     Storage storage2 =
         storageProvider.getStorage(
-            TEST_CREDENTIALS, TEST_STORAGE_OPTIONS, null, null, TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_CREDENTIALS,
+            TEST_STORAGE_OPTIONS,
+            null,
+            null,
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
 
     assertEquals(storageProvider.cache.size(), 1);
     // A single storage object should be shared across both the references.
@@ -134,10 +150,20 @@ public class StorageProviderTest {
 
     Storage storage1 =
         storageProvider.getStorage(
-            TEST_CREDENTIALS, TEST_STORAGE_OPTIONS, null, null, TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_CREDENTIALS,
+            TEST_STORAGE_OPTIONS,
+            null,
+            null,
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
     Storage storage2 =
         storageProvider.getStorage(
-            TEST_CREDENTIALS, testOptions, null, null, TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_CREDENTIALS,
+            testOptions,
+            null,
+            null,
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
 
     assertNotEquals(storage1, storage2);
     assertEquals(getReferences(storage1), 1);
@@ -148,17 +174,27 @@ public class StorageProviderTest {
   public void close_nonZeroReference_doesNotCloseObject() throws Exception {
     Storage storage1 =
         storageProvider.getStorage(
-            TEST_CREDENTIALS, TEST_STORAGE_OPTIONS, null, null, TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_CREDENTIALS,
+            TEST_STORAGE_OPTIONS,
+            null,
+            null,
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
     Storage storage2 =
         storageProvider.getStorage(
-            TEST_CREDENTIALS, TEST_STORAGE_OPTIONS, null, null, TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_CREDENTIALS,
+            TEST_STORAGE_OPTIONS,
+            null,
+            null,
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
 
     assertEquals(storageProvider.cache.size(), 1);
     // A single storage object should be shared across both the references.
     assertEquals(getReferences(storage1), 2);
     assertEquals(storage1, storage2);
 
-    storageProvider.close(storage1);
+    storageProvider.close(storage1, new NoOpMetricsRecorder());
     // Item is not removed from the cache but the reference is reduced.
     assertEquals(storageProvider.cache.size(), 1);
     assertEquals(getReferences(storage1), 1);
@@ -168,13 +204,18 @@ public class StorageProviderTest {
   public void close_zeroReference_closesStorageObject() throws Exception {
     Storage storage1 =
         storageProvider.getStorage(
-            TEST_CREDENTIALS, TEST_STORAGE_OPTIONS, null, null, TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+            TEST_CREDENTIALS,
+            TEST_STORAGE_OPTIONS,
+            null,
+            null,
+            TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+            new NoOpMetricsRecorder());
 
     assertEquals(storageProvider.cache.size(), 1);
     // A single storage object should be shared across both the references.
     assertEquals(getReferences(storage1), 1);
 
-    storageProvider.close(storage1);
+    storageProvider.close(storage1, new NoOpMetricsRecorder());
     // Item is removed from the cache.
     assertEquals(storageProvider.cache.size(), 0);
     assertEquals(getReferences(storage1), 0);
@@ -197,7 +238,8 @@ public class StorageProviderTest {
                   TEST_STORAGE_OPTIONS,
                   null,
                   null,
-                  TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC);
+                  TEST_DOWNSCOPED_ACCESS_TOKEN_FUNC,
+                  new NoOpMetricsRecorder());
             } catch (IOException e) {
               failures.getAndIncrement();
             } finally {

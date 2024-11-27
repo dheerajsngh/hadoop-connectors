@@ -23,12 +23,8 @@ import com.google.api.client.auth.oauth2.Credential;
 import com.google.api.client.http.HttpRequestInitializer;
 import com.google.auth.Credentials;
 import com.google.auto.value.AutoBuilder;
-import com.google.cloud.hadoop.util.AccessBoundary;
-import com.google.cloud.hadoop.util.AsyncWriteChannelOptions;
+import com.google.cloud.hadoop.util.*;
 import com.google.cloud.hadoop.util.AsyncWriteChannelOptions.PartFileCleanupType;
-import com.google.cloud.hadoop.util.ErrorTypeExtractor;
-import com.google.cloud.hadoop.util.GoogleCloudStorageEventBus;
-import com.google.cloud.hadoop.util.GrpcErrorTypeExtractor;
 import com.google.cloud.storage.BlobWriteSessionConfig;
 import com.google.cloud.storage.BlobWriteSessionConfigs;
 import com.google.cloud.storage.ParallelCompositeUploadBlobWriteSessionConfig.BufferAllocationStrategy;
@@ -68,6 +64,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
   private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   private final GoogleCloudStorageOptions storageOptions;
+  private final MetricsRecorder metricsRecorder;
 
   @VisibleForTesting final Storage storage;
 
@@ -107,6 +104,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
             credential,
             downscopedAccessTokenFn));
     this.storageOptions = options;
+    this.metricsRecorder = getMetricsRecorder(options, credential, httpRequestInitializer);
     this.storage =
         clientLibraryStorage == null
             ? storageProvider.getStorage(
@@ -114,7 +112,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
                 storageOptions,
                 gRPCInterceptors,
                 pCUExecutorService,
-                downscopedAccessTokenFn)
+                downscopedAccessTokenFn,
+                this.metricsRecorder)
             : clientLibraryStorage;
   }
 
@@ -149,6 +148,24 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
     return open(resourceId, /* itemInfo= */ null, readOptions);
   }
 
+  private static MetricsRecorder getMetricsRecorder(
+      GoogleCloudStorageOptions options,
+      Credential credential,
+      HttpRequestInitializer httpRequestInitializer) {
+    if (GoogleCloudStorageOptions.MetricsSink.CLOUD_MONITORING != options.getMetricsSink()) {
+      return new NoOpMetricsRecorder();
+    }
+
+    Credential theCredential = credential;
+
+    if (theCredential == null) {
+      theCredential = ((RetryHttpInitializer) httpRequestInitializer).getCredential();
+    }
+
+    return CloudMonitoringMetricsRecorder.create(
+        options.getProjectId(), new CredentialAdapter(theCredential));
+  }
+
   private SeekableByteChannel open(
       StorageResourceId resourceId,
       GoogleCloudStorageItemInfo itemInfo,
@@ -166,7 +183,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
   public void close() {
     try {
       try {
-        storageProvider.close(storage);
+        storageProvider.close(storage, metricsRecorder);
       } catch (Exception e) {
         logger.atWarning().withCause(e).log("Error occurred while closing the storage client");
       }

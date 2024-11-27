@@ -63,6 +63,28 @@ class CloudMonitoringMetricsRecorder implements MetricsRecorder {
   static final MeasureLong REQUEST_RETRIES =
       MeasureLong.create("gcsio/retries", "The distribution of retry attempts for gcs calls", BY);
 
+  static final MeasureLong STORAGE_CACHE_HIT_COUNT =
+      MeasureLong.create(
+          "gcsio/cache/storage_cache_hit", "The distribution of cache hit for storage object", BY);
+  static final MeasureLong STORAGE_CACHE_MISS_COUNT =
+      MeasureLong.create(
+          "gcsio/cache/storage_cache_miss",
+          "The distribution of cache miss for storage object",
+          BY);
+  static final MeasureLong STORAGE_CACHE_IGNORED_COUNT =
+      MeasureLong.create(
+          "gcsio/cache/storage_cache_ignored",
+          "The distribution of number of times storage cache was not used",
+          BY);
+  static final MeasureLong STORAGE_CACHE_CLOSED_COUNT =
+      MeasureLong.create(
+          "gcsio/cache/storage_cache_closed",
+          "The distribution of number of times storage object in cache was closed",
+          BY);
+  static final MeasureLong STORAGE_CACHE_SIZE =
+      MeasureLong.create(
+          "gcsio/cache/storage_cache_size", "The distribution of storage object cache size", BY);
+
   static final TagKey METHOD = TagKey.create("method");
   static final TagKey STATUS = TagKey.create("status");
   static final TagKey ERROR = TagKey.create("error");
@@ -138,6 +160,36 @@ class CloudMonitoringMetricsRecorder implements MetricsRecorder {
               Name.create("gcsio/requests"),
               "The distribution of request counts for a method",
               REQUESTS,
+              COUNT,
+              TAG_KEYS),
+          View.create(
+              Name.create("gcsio/cache/storage_cache_hit"),
+              "The distribution of cache hit for storage object",
+              STORAGE_CACHE_HIT_COUNT,
+              COUNT,
+              TAG_KEYS),
+          View.create(
+              Name.create("gcsio/cache/storage_cache_miss"),
+              "The distribution of cache miss for storage object",
+              STORAGE_CACHE_MISS_COUNT,
+              COUNT,
+              TAG_KEYS),
+          View.create(
+              Name.create("gcsio/cache/storage_cache_ignored"),
+              "The distribution of number of times storage cache was not used",
+              STORAGE_CACHE_IGNORED_COUNT,
+              COUNT,
+              TAG_KEYS),
+          View.create(
+              Name.create("gcsio/cache/storage_cache_closed"),
+              "The distribution of number of times storage object in cache was closed",
+              STORAGE_CACHE_CLOSED_COUNT,
+              COUNT,
+              TAG_KEYS),
+          View.create(
+              Name.create("gcsio/cache/storage_cache_size"),
+              "The distribution of storage object cache size",
+              STORAGE_CACHE_SIZE,
               COUNT,
               TAG_KEYS),
         };

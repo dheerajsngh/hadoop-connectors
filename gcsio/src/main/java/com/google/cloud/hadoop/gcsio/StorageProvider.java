@@ -54,9 +54,15 @@ public class StorageProvider {
       GoogleCloudStorageOptions storageOptions,
       List<ClientInterceptor> interceptors,
       ExecutorService pCUExecutorService,
-      Function<List<AccessBoundary>, String> downscopedAccessTokenFn)
+      Function<List<AccessBoundary>, String> downscopedAccessTokenFn,
+      MetricsRecorder metricsRecorder)
       throws IOException {
     if (!canCache(storageOptions, interceptors, pCUExecutorService)) {
+      metricsRecorder.recordTaggedStat(
+          CloudMonitoringMetricsRecorder.METHOD,
+          "getStorage",
+          CloudMonitoringMetricsRecorder.STORAGE_CACHE_IGNORED_COUNT,
+          1L);
       return createStorage(
           credentials, storageOptions, interceptors, pCUExecutorService, downscopedAccessTokenFn);
     }
@@ -70,11 +76,26 @@ public class StorageProvider {
       logger.atFinest().log(
           "Cache miss, created new storage client. Cache hit count : %d, Cache hit rate : %.2f",
           cache.stats().hitCount(), cache.stats().hitRate());
+      metricsRecorder.recordTaggedStat(
+          CloudMonitoringMetricsRecorder.METHOD,
+          "getStorage",
+          CloudMonitoringMetricsRecorder.STORAGE_CACHE_MISS_COUNT,
+          cache.stats().missCount());
     } else {
       logger.atFinest().log(
           "Cache hit, reusing the storage client. Cache hit count : %d, Cache hit rate : %.2f",
           cache.stats().hitCount(), cache.stats().hitRate());
+      metricsRecorder.recordTaggedStat(
+          CloudMonitoringMetricsRecorder.METHOD,
+          "getStorage",
+          CloudMonitoringMetricsRecorder.STORAGE_CACHE_HIT_COUNT,
+          cache.stats().hitCount());
     }
+    metricsRecorder.recordTaggedStat(
+        CloudMonitoringMetricsRecorder.METHOD,
+        "getStorage",
+        CloudMonitoringMetricsRecorder.STORAGE_CACHE_SIZE,
+        cache.size());
     // Increment the reference count of the storage object.
     storageClientToReferenceMap.put(
         storage, storageClientToReferenceMap.getOrDefault(storage, 0) + 1);
@@ -85,9 +106,14 @@ public class StorageProvider {
    * Signal the storage object to be closed. The resources held by the storage object will be freed
    * only if the instance is closed by all the objects sharing this storage reference.
    */
-  synchronized void close(Storage storage) {
+  synchronized void close(Storage storage, MetricsRecorder metricsRecorder) {
     if (!storageClientToReferenceMap.containsKey(storage)) {
       closeStorage(storage);
+      metricsRecorder.recordTaggedStat(
+          CloudMonitoringMetricsRecorder.METHOD,
+          "close",
+          CloudMonitoringMetricsRecorder.STORAGE_CACHE_IGNORED_COUNT,
+          1L);
       return;
     }
     // Decrement the reference count of the object.
@@ -98,6 +124,11 @@ public class StorageProvider {
       storageToCacheKeyMap.remove(storage);
       storageClientToReferenceMap.remove(storage);
       closeStorage(storage);
+      metricsRecorder.recordTaggedStat(
+          CloudMonitoringMetricsRecorder.METHOD,
+          "close",
+          CloudMonitoringMetricsRecorder.STORAGE_CACHE_CLOSED_COUNT,
+          1L);
     }
   }
 
