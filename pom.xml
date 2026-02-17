@@ -25,7 +25,7 @@
 
   <groupId>com.google.cloud.bigdataoss</groupId>
   <artifactId>bigdataoss-parent</artifactId>
-  <version>3.0.0-SNAPSHOT</version>
+  <version>4.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <url>https://github.com/GoogleCloudDataproc/hadoop-connectors</url>
@@ -58,49 +58,26 @@
     <url>https://github.com/GoogleCloudDataproc/hadoop-connectors/issues</url>
   </issueManagement>
 
-  <distributionManagement>
-    <snapshotRepository>
-      <id>ossrh</id>
-      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
-    </snapshotRepository>
-    <repository>
-      <id>ossrh</id>
-      <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-    </repository>
-  </distributionManagement>
-
   <properties>
     <argLine/>
 
-    <build.java.source.version>11</build.java.source.version>
-    <build.java.target.version>11</build.java.target.version>
+    <build.java.source.version>17</build.java.source.version>
+    <build.java.target.version>17</build.java.target.version>
 
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
     <gpg.skip>true</gpg.skip>
 
-    <bigdataoss.version>3.0.0-SNAPSHOT</bigdataoss.version>
+    <bigdataoss.version>4.0.0-SNAPSHOT</bigdataoss.version>
 
-    <google.api-client.version>2.1.1</google.api-client.version>
-    <google.api-client-libraries.version>2.0.0</google.api-client-libraries.version>
-    <google.api-iamcredentials.version>v1-rev20211203-${google.api-client-libraries.version}</google.api-iamcredentials.version>
-    <google.api-storage.version>v1-rev20250312-${google.api-client-libraries.version}</google.api-storage.version>
-    <google.api.grpc.proto-google-iam-v1.version>1.6.23</google.api.grpc.proto-google-iam-v1.version>
-    <google.auth.version>1.33.1</google.auth.version>
     <google.auto-value.version>1.10.4</google.auto-value.version>
-    <google.cloud-core.verion>2.44.1</google.cloud-core.verion>
-    <google.cloud-storage.bom.version>2.49.0</google.cloud-storage.bom.version>
+    <google.cloud.library.bom.version>26.73.0</google.cloud.library.bom.version>
     <google.error-prone.version>2.16</google.error-prone.version>
+    <google.error-prone-annotations.version>2.38.0</google.error-prone-annotations.version>
     <google.flogger.version>0.7.4</google.flogger.version>
-    <google.gax.version>2.54.1</google.gax.version>
-    <google.gson.version>2.10</google.gson.version>
-    <google.guava.version>33.1.0-jre</google.guava.version>
-    <google.http-client.version>1.42.3</google.http-client.version>
+    <google.guava.version>33.4.8-jre</google.guava.version>
     <google.java-format.version>1.15.0</google.java-format.version>
-    <google.oauth-client.version>1.34.1</google.oauth-client.version>
-    <google.protobuf.version>3.25.3</google.protobuf.version>
-    <grpc.version>1.68.0</grpc.version>
-    <hadoop.version>3.3.6</hadoop.version>
+    <hadoop.version>3.4.2</hadoop.version>
     <opencensus.version>0.31.1</opencensus.version>
 
     <!-- Test dependencies -->
@@ -111,8 +88,20 @@
     <!-- TODO: remove AssertJ dependency when Hadoop will fix transitive test dependencies -->
     <assertj.version>3.14.0</assertj.version>
     <deploy.skip>true</deploy.skip>
-    <nexus.remote.skip>false</nexus.remote.skip>
+    <central.publishing.skip>false</central.publishing.skip>
+    <java.addopens.args>--add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED</java.addopens.args>
   </properties>
+
+  <distributionManagement>
+    <snapshotRepository>
+      <id>artifact-registry</id>
+      <url>artifactregistry://us-maven.pkg.dev/oss-exit-gate-prod/hadoop-connectors--mavencentral</url>
+    </snapshotRepository>
+    <repository>
+      <id>artifact-registry</id>
+      <url>artifactregistry://us-maven.pkg.dev/oss-exit-gate-prod/hadoop-connectors--mavencentral</url>
+    </repository>
+  </distributionManagement>
 
   <modules>
     <module>gcs/pom.xml</module>
@@ -149,7 +138,7 @@
               </includes>
               <reuseForks>false</reuseForks>
               <forkCount>4</forkCount>
-              <argLine>-Xmx2g @{argLine}</argLine>
+              <argLine>-Xmx2g ${java.addopens.args} @{argLine}</argLine>
               <reportNameSuffix>sponge_log</reportNameSuffix>
             </configuration>
           </plugin>
@@ -177,15 +166,15 @@
       <build>
         <plugins>
           <plugin>
-            <groupId>org.sonatype.plugins</groupId>
-            <artifactId>nexus-staging-maven-plugin</artifactId>
-            <version>1.6.7</version>
-            <extensions>true</extensions>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.8.0</version>
+            <extensions>false</extensions>
             <configuration>
-              <serverId>ossrh</serverId>
-              <nexusUrl>https://oss.sonatype.org/</nexusUrl>
-              <autoReleaseAfterClose>false</autoReleaseAfterClose>
-              <skipRemoteStaging>${nexus.remote.skip}</skipRemoteStaging>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>false</autoPublish>
+              <skipPublishing>${central.publishing.skip}</skipPublishing>
+              <checksums>required</checksums>
             </configuration>
           </plugin>
           <plugin>
@@ -223,6 +212,10 @@
                 <goals>
                   <goal>jar</goal>
                 </goals>
+                <configuration>
+                  <doclint>none</doclint>
+                  <failOnError>false</failOnError>
+                </configuration>
               </execution>
             </executions>
           </plugin>
@@ -275,67 +268,11 @@
   <dependencyManagement>
     <dependencies>
       <dependency>
-        <groupId>com.google.http-client</groupId>
-        <artifactId>google-http-client-gson</artifactId>
-        <version>${google.http-client.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.api-client</groupId>
-        <artifactId>google-api-client-gson</artifactId>
-        <version>${google.api-client.version}</version>
-        <exclusions>
-          <exclusion>
-            <groupId>com.google.http-client</groupId>
-            <artifactId>google-http-client-gson</artifactId>
-          </exclusion>
-        </exclusions>
-      </dependency>
-      <dependency>
-        <groupId>com.google.api</groupId>
-        <artifactId>gax-grpc</artifactId>
-        <version>${google.gax.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.apis</groupId>
-        <artifactId>google-api-services-iamcredentials</artifactId>
-        <version>${google.api-iamcredentials.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.apis</groupId>
-        <artifactId>google-api-services-storage</artifactId>
-        <version>${google.api-storage.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.oauth-client</groupId>
-        <artifactId>google-oauth-client</artifactId>
-        <version>${google.oauth-client.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.auth</groupId>
-        <artifactId>google-auth-library-credentials</artifactId>
-        <version>${google.auth.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.auth</groupId>
-        <artifactId>google-auth-library-oauth2-http</artifactId>
-        <version>${google.auth.version}</version>
-      </dependency>
-      <dependency>
         <groupId>com.google.cloud</groupId>
-        <artifactId>google-cloud-core</artifactId>
-        <version>${google.cloud-core.verion}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.cloud</groupId>
-        <artifactId>google-cloud-storage-bom</artifactId>
-        <version>${google.cloud-storage.bom.version}</version>
+        <artifactId>libraries-bom</artifactId>
+        <version>${google.cloud.library.bom.version}</version>
         <type>pom</type>
         <scope>import</scope>
-      </dependency>
-      <dependency>
-        <groupId>com.google.code.gson</groupId>
-        <artifactId>gson</artifactId>
-        <version>${google.gson.version}</version>
       </dependency>
       <dependency>
         <groupId>com.google.auto.value</groupId>
@@ -346,18 +283,6 @@
         <groupId>com.google.guava</groupId>
         <artifactId>guava</artifactId>
         <version>${google.guava.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.api.grpc</groupId>
-        <artifactId>proto-google-iam-v1</artifactId>
-        <version>${google.api.grpc.proto-google-iam-v1.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.google.protobuf</groupId>
-        <artifactId>protobuf-bom</artifactId>
-        <version>${google.protobuf.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
       </dependency>
       <dependency>
         <groupId>com.google.flogger</groupId>
@@ -376,11 +301,9 @@
         <scope>runtime</scope>
       </dependency>
       <dependency>
-        <groupId>io.grpc</groupId>
-        <artifactId>grpc-bom</artifactId>
-        <version>${grpc.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
+        <groupId>com.google.errorprone</groupId>
+        <artifactId>error_prone_annotations</artifactId>
+        <version>${google.error-prone-annotations.version}</version>
       </dependency>
       <dependency>
         <groupId>io.opencensus</groupId>
@@ -429,12 +352,6 @@
         <groupId>org.apache.hadoop</groupId>
         <artifactId>hadoop-mapreduce-client-common</artifactId>
         <version>${hadoop.version}</version>
-        <scope>test</scope>
-      </dependency>
-      <dependency>
-        <groupId>io.grpc</groupId>
-        <artifactId>grpc-testing</artifactId>
-        <version>${grpc.version}</version>
         <scope>test</scope>
       </dependency>
       <dependency>
@@ -489,6 +406,13 @@
   </dependencyManagement>
 
   <build>
+    <extensions>
+      <extension>
+        <groupId>com.google.cloud.artifactregistry</groupId>
+        <artifactId>artifactregistry-maven-wagon</artifactId>
+        <version>2.2.5</version>
+      </extension>
+    </extensions>
     <resources>
       <resource>
         <directory>src/main/resources</directory>

@@ -21,12 +21,14 @@
   <parent>
     <groupId>com.google.cloud.bigdataoss</groupId>
     <artifactId>bigdataoss-parent</artifactId>
-    <version>3.0.0-SNAPSHOT</version>
+    <version>4.0.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
+  <name>util</name>
+
   <artifactId>util</artifactId>
-  <version>3.0.0-SNAPSHOT</version>
+  <version>4.0.0-SNAPSHOT</version>
 
   <dependencies>
     <dependency>
@@ -36,14 +38,6 @@
     <dependency>
       <groupId>com.google.api-client</groupId>
       <artifactId>google-api-client-gson</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.google.apis</groupId>
-      <artifactId>google-api-services-iamcredentials</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.google.apis</groupId>
-      <artifactId>google-api-services-storage</artifactId>
     </dependency>
     <dependency>
       <groupId>com.google.guava</groupId>
@@ -91,6 +85,12 @@
     <dependency>
       <groupId>io.grpc</groupId>
       <artifactId>grpc-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>1.7.36</version>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 </project>

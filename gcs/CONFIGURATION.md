@@ -20,12 +20,12 @@
 *   `fs.gs.copy.with.rewrite.enable` (default: `true`)
 
     Whether to perform copy operation using Rewrite requests which allows copy
-    files between different locations and storage classes.
+    files between different locations and storage classes. Is effective only if `fs.gs.client.type` is set to `HTTP_API_CLIENT`. For `STORAGE_CLIENT` (gRPC), rewrite is always enabled.
 
 *   `fs.gs.rewrite.max.chunk.size` (default: `512m`)
 
     Maximum size of object chunk that will be rewritten in a single rewrite
-    request when `fs.gs.copy.with.rewrite.enable` is set to `true`.
+    request. For `HTTP_API_CLIENT`, this is effective only when `fs.gs.copy.with.rewrite.enable` is `true`. For `STORAGE_CLIENT` (gRPC), rewrite is always enabled, so this configuration is always effective.
 
 *   `fs.gs.reported.permissions` (default: `700`)
 
@@ -54,6 +54,17 @@
     doesn't support the requested type, then getFileChecksum() method will
     return `null` for that file. Supported checksum types are `NONE`, `CRC32C`
     and `MD5`
+
+*   `fs.gs.cloud.logging.enable` (default: `false`)
+
+    If `true`, exports Cloud Storage Connector logs to the GCP Logging service. The service account
+    used by the connector must have `roles/logging.logWriter` IAM permission in the GCP project
+    for this feature to work.
+
+    The logs will be labelled with the log name `gcs-connector`, which will be suffixed with the
+    value of `fs.gs.application.name.suffix` if set. For example, if
+    `fs.gs.application.name.suffix` is set to `my-app`, the log name will be
+    `gcs-connector-my-app`.
 
 *   `fs.gs.status.parallel.enable` (default: `true`)
 
@@ -101,19 +112,20 @@
 *   `fs.gs.max.requests.per.batch` (default: `15`)
 
     Maximum number of Cloud Storage requests that could be sent in a single
-    batch request.
+    batch request. This is effective only for `HTTP_API_CLIENT`. `STORAGE_CLIENT` (gRPC)
+    executes requests in parallel using `fs.gs.batch.threads` without aggregation.
 
 *   `fs.gs.batch.threads` (default: `15`)
 
-    Maximum number of threads used to execute batch requests in parallel. Each
-    thread batches at most `fs.gs.max.requests.per.batch` Cloud Storage requests
-    in a single batch request. These threads are used to execute the Class A,
-    Class B and Free Cloud Storage operations as copy, list, delete, etc. These
-    operations are part of typical `hdfs` CLI commands such as `hdfs mv`, `hdfs
-    cp`, etc.
+    Maximum number of threads used to execute requests in parallel.
 
-    Depending on the number of requests the connector evenly distributes the
-    number of requests across batch threads.
+    For `HTTP_API_CLIENT`, each thread batches at most `fs.gs.max.requests.per.batch`
+    Cloud Storage requests in a single batch request. For `STORAGE_CLIENT` (gRPC),
+    this controls the size of the thread pool used for parallel operations.
+
+    These threads are used to execute the Class A, Class B and Free Cloud Storage
+    operations as copy, list, delete, etc. These operations are part of typical
+    `hdfs` CLI commands such as `hdfs mv`, `hdfs cp`, etc. Depending on the number of requests the connector evenly distributes the number of requests across batch threads.
 
 *   `fs.gs.list.max.items.per.call` (default: `5000`)
 
@@ -131,7 +143,7 @@
 
 *   `fs.gs.storage.http.headers.<HEADER>=<VALUE>` (not set by default)
 
-    Custom HTTP headers added to Cloud Storage API requests.
+    Custom HTTP headers added to Cloud Storage API requests. For `STORAGE_CLIENT` (gRPC), these headers are passed as request metadata where supported.
 
     Example:
 
@@ -140,7 +152,29 @@
     fs.gs.storage.http.headers.another-custom-header=another_custom_value
     ```
 
+*   `fs.gs.application.name.suffix` (not set by default)
+
+    Suffix that will be added to HTTP `User-Agent` header set in all Cloud
+    Storage requests.
+    When `fs.gs.cloud.logging.enable` is set to `true`, this suffix will be appended to the log name `gcs-connector` to
+    form the final log name. For example, if set to `my-app`, log name in GCP Logging will be `gcs-connector-my-app`.
+
+*   `fs.gs.proxy.address` (not set by default)
+
+    Proxy address that connector can use to send Cloud Storage requests. The
+    proxy must be an HTTP proxy and address should be in the `host:port` form.
+
+*   `fs.gs.proxy.username` (not set by default)
+
+    Proxy username that connector can use to send Cloud Storage requests.
+
+*   `fs.gs.proxy.password` (not set by default)
+
+    Proxy password that connector can use to send Cloud Storage requests.
+
 ### Encryption ([CSEK](https://cloud.google.com/storage/docs/encryption/customer-supplied-keys))
+
+**Note:** For `STORAGE_CLIENT` (gRPC), CSEK is supported for Rewrite/Copy/Move operations and non-Bidi Reads, but ignored for `create` (Write) operations and Bidi Reads.
 
 *   `fs.gs.encryption.algorithm` (not set by default)
 
@@ -268,6 +302,7 @@ default service account impersonation.
     call. If the client code can handle late failures on not-found errors, or
     has independently already ensured that a file exists before calling open(),
     then set this property to false for more efficient reads.
+    Not supported by `STORAGE_CLIENT` (gRPC) when `fs.gs.bidi.enable` is `true`.
 
 *   `fs.gs.inputstream.support.gzip.encoding.enable` (default: `false`)
 
@@ -277,16 +312,15 @@ default service account impersonation.
     This feature is disabled by default because processing of
     [GZIP encoded](https://cloud.google.com/storage/docs/transcoding#decompressive_transcoding)
     files is inefficient and error-prone in Hadoop and Spark.
+    Not supported by `STORAGE_CLIENT` (gRPC) when `fs.gs.bidi.enable` is `true` (always throws exception).
 
 *   `fs.gs.outputstream.buffer.size` (default: `8m`)
 
-    Write buffer size used by the file system API to send the data to be
-    uploaded to Cloud Storage upload thread via pipes. The various pipe types
-    are documented below.
+    Write buffer size used by the file system API to buffer data before writing to Cloud Storage.
 
 *   `fs.gs.outputstream.pipe.type` (default: `IO_STREAM_PIPE`)
 
-    Pipe type used for uploading Cloud Storage objects.
+    Pipe type used for uploading Cloud Storage objects. Is effective only if `fs.gs.client.type` is set to `HTTP_API_CLIENT`.
 
     Valid values:
 
@@ -310,14 +344,13 @@ default service account impersonation.
     Pipe buffer size used for uploading Cloud Storage objects. This pipe is an
     intermediate channel which is used to receive the data on one side and allow
     for reading of the data by the Cloud Storage upload thread on the other
-    side.
+    side. Is effective only if `fs.gs.client.type` is set to `HTTP_API_CLIENT`.
 
 *   `fs.gs.outputstream.upload.chunk.size` (default: `24m`)
 
     The number of bytes in one Google Cloud Storage upload request via the
     [`MediaHttUploader` class](https://cloud.google.com/java/docs/reference/google-api-client/latest/com.google.api.client.googleapis.media.MediaHttpUploader).
-    This is used only for JSON API and for best performance should be a multiple
-    of 8 MiB.
+    Not supported by `STORAGE_CLIENT` (gRPC) when `fs.gs.bidi.enable` is `true` and for best performance should be a multiple of 8 MiB.
 
     Having a large value like 64 MiB allows the upload to Cloud Storage to be
     faster due to smaller number of HTTP requests needed for upload. But on the
@@ -334,11 +367,11 @@ default service account impersonation.
     The upload cache size in bytes used for high-level upload retries. To
     disable this feature set this property to zero or negative value. Retry will
     be performed if total size of written/uploaded data to the object is less
-    than or equal to the cache size.
+    than or equal to the cache size. Is effective only if `fs.gs.client.type` is set to `HTTP_API_CLIENT`.
 
 *   `fs.gs.outputstream.direct.upload.enable` (default: `false`)
 
-    Enables Cloud Storage direct uploads.
+    Enables Cloud Storage direct uploads. Is effective only if `fs.gs.client.type` is set to `HTTP_API_CLIENT`.
 
 *   `fs.gs.outputstream.sync.min.interval` (default: `0`)
 
@@ -358,37 +391,22 @@ Knobs configure the vectoredRead API
    will be combined with exiting rangeRequest while fetching data from
    underneath channel. Result will again be decoupled once data is fetched for
    combined range request.
+   Supported by `HTTP_API_CLIENT`. Supported by `STORAGE_CLIENT` (gRPC) only when `fs.gs.bidi.enable` is `false`.
 
 * `fs.gs.vectored.read.merged.range.max.size` (default: `8m`)
    It controls the length of content requested via merged/combined range request.
    If by merging ranges resulted content is greater than this value, ranges will
    not be merged. Do, consider increasing this value if task queue of range
    request is overloaded.
+   Supported by `HTTP_API_CLIENT`. Supported by `STORAGE_CLIENT` (gRPC) only when `fs.gs.bidi.enable` is `false`.
 
 * `fs.gs.vectored.read.threads` (default: `16`)
    It controls the parallel processing of range request. These threads will be
    shared across all readVectored invocation. If the task queue of range request
    is overloaded do consider increasing this value.
+   Supported by `HTTP_API_CLIENT`, `STORAGE_CLIENT` (gRPC) only when `fs.gs.bidi.enable` is `false`. If `fs.gs.bidi.enable` is `true`, `fs.gs.bidi.thread.count` is used instead.
 
 ### HTTP transport configuration
-
-*   `fs.gs.application.name.suffix` (not set by default)
-
-    Suffix that will be added to HTTP `User-Agent` header set in all Cloud
-    Storage requests.
-
-*   `fs.gs.proxy.address` (not set by default)
-
-    Proxy address that connector can use to send Cloud Storage requests. The
-    proxy must be an HTTP proxy and address should be in the `host:port` form.
-
-*   `fs.gs.proxy.username` (not set by default)
-
-    Proxy username that connector can use to send Cloud Storage requests.
-
-*   `fs.gs.proxy.password` (not set by default)
-
-    Proxy password that connector can use to send Cloud Storage requests.
 
 **Note: Retry configuration is only valid for client type=HTTP_API_CLIENT for now.**
 
@@ -406,7 +424,7 @@ Knobs configure the vectoredRead API
     Timeout to read from an established connection. Use `0` for an infinite
     timeout.
 
-### API client configuration
+#### API client configuration
 
 *   `fs.gs.storage.root.url` (default: `https://storage.googleapis.com/`)
 
@@ -421,7 +439,7 @@ Knobs configure the vectoredRead API
 *   `fs.gs.inputstream.fadvise` (default: `AUTO`)
 
     Tunes reading objects behavior to optimize HTTP GET requests for various use
-    cases.
+    cases. Ignored by `STORAGE_CLIENT` (gRPC) when `fs.gs.bidi.enable` is `true`.
 
     This property controls fadvise feature that allows to read objects in
     different modes:
@@ -448,18 +466,36 @@ Knobs configure the vectoredRead API
         streaming requests as soon as first backward read or forward read for
         more than `fs.gs.inputstream.inplace.seek.limit` bytes was detected.
 
+    *   `AUTO_RANDOM` - It is complementing `AUTO` mode which uses sequential
+        mode to start with and adapts to bounded range requests. `AUTO_RANDOM`
+        mode uses bounded channel initially and adapts to sequential requests if
+        consecutive requests are within `fs.gs.inputstream.min.range.request.size`.
+        gzip-encode object will bypass this adoption, it will always be a
+        streaming(unbounded) channel. This helps in cases where egress limits is
+        getting breached for customer because `AUTO` mode will always lead to
+        one unbounded channel for a file. `AUTO_RANDOM` will avoid such unwanted
+        unbounded channels.
+
+*   `fs.gs.fadvise.request.track.count` (default: `3`)
+
+    Self adaptive fadvise mode uses distance between the served requests to
+    decide the access pattern. This property controls how many such requests
+    need to be tracked. It is used when `AUTO_RANDOM` is selected.
+    Ignored by `STORAGE_CLIENT` (gRPC) when `fs.gs.bidi.enable` is `true`.
+
 *   `fs.gs.inputstream.inplace.seek.limit` (default: `8m`)
 
     If forward seeks are within this many bytes of the current position, seeks
     are performed by reading and discarding bytes in-place rather than opening a
     new underlying stream.
+    Ignored by `STORAGE_CLIENT` (gRPC) when `fs.gs.bidi.enable` is `true`.
 
 *   `fs.gs.inputstream.min.range.request.size` (default: `2m`)
 
     Minimum size in bytes of the read range for Cloud Storage request when
     opening a new stream to read an object.
 
-### grpc configuration
+### gRPC configuration
 
 gRPC is an optimized way to connect with gcs backend. It offers
 better latency and increased bandwidth. Currently supported only for read/write operations.
@@ -486,6 +522,26 @@ better latency and increased bandwidth. Currently supported only for read/write 
    * `CHUNK_UPLOAD` uploads file in chunks, size of chunks are configurable via
      `fs.gs.outputstream.upload.chunk.size`
 
+* `fs.gs.storage.client.cache.enable` (default: `false`) enables gRPC storage client caching so FileSystem objects with similar configs can share the client.
+
+
+### Bidi configurations
+**Note:  Bidi configurations are effective only if `fs.gs.client.type` is set to `STORAGE_CLIENT` (gRPC).**
+* `fs.gs.bidi.enable` (default: `false`)
+     Enables reads and writes for Rapid Storage.
+     Other bidi configurations only apply when this flag is true.
+* `fs.gs.bidi.client.timeout` (default: `1s`)
+     Maximum time in seconds to wait for the establishment of a Bidi session.
+     Effective only when `fs.gs.bidi.enable` is `true`.
+* `fs.gs.bidi.finalize.on.close` (default: `false`)
+     This property is valid for writing to appendable objects with the bidi channel.
+     If set to false, the object will not be finalized when the channel is closed.
+     Effective only when `fs.gs.bidi.enable` is `true`.
+* `fs.gs.bidi.thread.count` (default: `16`)
+     Number of threads used by ThreadPoolExecutor in bidi channel. This executor is used to read
+     individual range and populate the buffer.
+     Effective only when `fs.gs.bidi.enable` is `true`.
+
 ### Performance cache configuration
 
 *   `fs.gs.performance.cache.enable` (default: `false`)
@@ -501,7 +557,25 @@ better latency and increased bandwidth. Currently supported only for read/write 
     Maximum number of time to store a cached metadata in the performance cache
     before it's invalidated.
 
+### Hierarchical Namespace (HNS) Configuration
+
+* `fs.gs.hierarchical.namespace.folders.enable` (default: `false`)
+
+    If true, the connector will use native HNS APIs for `rename` and `delete` operations
+    on Hierarchical Namespace (HNS) enabled buckets. This includes using the `renameFolder` API for directory renames
+    and deleting native folders during `delete` operations.
+
+* `fs.gs.hierarchical.namespace.folders.optimization.enable` (default: `false`)
+
+    If true, this flag enables a set of optimizations for HNS-enabled buckets to improve performance and correctness.
+    These optimizations are only active when `fs.gs.hierarchical.namespace.folders.enable` is also set to `true`.
+    The optimizations include using native HNS folder APIs for operations like `mkdir`, `getFileInfo`, and `list`,
+    and skipping the "implicit directory repair" step for rename and delete. Enabling this flag may introduce backward
+    compatibility issues with older connector versions.
+
 ### Cloud Storage [Requester Pays](https://cloud.google.com/storage/docs/requester-pays) feature configuration:
+
+**Note:  Requester Pays configurations are effective only if `fs.gs.client.type` is set to `HTTP_API_CLIENT`.**
 
 *   `fs.gs.requester.pays.mode` (default: `DISABLED`)
 

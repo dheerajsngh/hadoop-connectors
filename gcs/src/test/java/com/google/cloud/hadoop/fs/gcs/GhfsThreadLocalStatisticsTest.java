@@ -17,6 +17,7 @@
 package com.google.cloud.hadoop.fs.gcs;
 
 import static com.google.common.truth.Truth.assertThat;
+import static java.util.Map.entry;
 
 import com.google.cloud.hadoop.gcsio.GoogleCloudStorageStatistics;
 import java.util.*;
@@ -38,6 +39,8 @@ public class GhfsThreadLocalStatisticsTest {
   private static final String BACKOFF_TIME = "backoffTime";
   private static final String HADOOP_API_COUNT = "hadoopApiCount";
   private static final String HADOOP_API_TIME = "hadoopApiTime";
+  private static final String STREAM_READ_VECTORED_COUNT = "readVectoredCount";
+  private static final String STREAM_READ_VECTORED_RANGE_COUNT = "readVectoredRangeCount";
 
   private static Map<GoogleCloudStorageStatistics, String> typeToNameMapping =
       Map.of(
@@ -56,13 +59,15 @@ public class GhfsThreadLocalStatisticsTest {
   private Map<String, Long> getInitMetrics() {
     Map<String, Long> result =
         new HashMap<>(
-            Map.of(
-                BACKOFF_COUNT, 0L,
-                BACKOFF_TIME, 0L,
-                HADOOP_API_COUNT, 0L,
-                HADOOP_API_TIME, 0L,
-                GCS_API_COUNT, 0L,
-                GCS_API_TIME, 0L));
+            Map.ofEntries(
+                entry(BACKOFF_COUNT, 0L),
+                entry(BACKOFF_TIME, 0L),
+                entry(HADOOP_API_COUNT, 0L),
+                entry(HADOOP_API_TIME, 0L),
+                entry(GCS_API_COUNT, 0L),
+                entry(GCS_API_TIME, 0L),
+                entry(STREAM_READ_VECTORED_COUNT, 0L),
+                entry(STREAM_READ_VECTORED_RANGE_COUNT, 0L)));
 
     return result;
   }
@@ -121,6 +126,10 @@ public class GhfsThreadLocalStatisticsTest {
         expectedMetrics.merge(HADOOP_API_COUNT, 1L, Long::sum);
       } else if (ghfsStatistic == GhfsStatistic.GCS_CONNECTOR_TIME) {
         expectedMetrics.merge(HADOOP_API_TIME, 1L, Long::sum);
+      } else if (ghfsStatistic == GhfsStatistic.STREAM_READ_VECTORED_OPERATIONS) {
+        expectedMetrics.merge(STREAM_READ_VECTORED_COUNT, 1L, Long::sum);
+      } else if (ghfsStatistic == GhfsStatistic.STREAM_READ_VECTORED_READ_COMBINED_RANGES) {
+        expectedMetrics.merge(STREAM_READ_VECTORED_RANGE_COUNT, 1L, Long::sum);
       }
 
       verify(expectedMetrics, actualMetrics);
@@ -133,6 +142,10 @@ public class GhfsThreadLocalStatisticsTest {
         expectedMetrics.merge(HADOOP_API_COUNT, theValue, Long::sum);
       } else if (ghfsStatistic == GhfsStatistic.GCS_CONNECTOR_TIME) {
         expectedMetrics.merge(HADOOP_API_TIME, theValue, Long::sum);
+      } else if (ghfsStatistic == GhfsStatistic.STREAM_READ_VECTORED_OPERATIONS) {
+        expectedMetrics.merge(STREAM_READ_VECTORED_COUNT, theValue, Long::sum);
+      } else if (ghfsStatistic == GhfsStatistic.STREAM_READ_VECTORED_READ_COMBINED_RANGES) {
+        expectedMetrics.merge(STREAM_READ_VECTORED_RANGE_COUNT, theValue, Long::sum);
       }
 
       verify(expectedMetrics, actualMetrics);

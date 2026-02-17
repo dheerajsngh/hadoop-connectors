@@ -1,3 +1,19 @@
+/*
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.google.cloud.hadoop.gcsio;
 
 import static com.google.cloud.hadoop.gcsio.GoogleCloudStorageClientGrpcDownscopingInterceptor.GOOGLE_STORAGE_V_2_STORAGE_COMPOSE_OBJECT;
@@ -212,6 +228,39 @@ public class GoogleCloudStorageClientGrpcDownscopingInterceptorTest extends Test
     interceptedLoggingCall.sendMessage(composeObjectRequest);
 
     verify(interceptedLoggingCall, handler.getExpectedComposeHeader(sources));
+  }
+
+  public void testMultipleAuthInterceptors_shouldNotSendMultipleAuthHeaders() {
+    GoogleCloudStorageClientGrpcDownscopingInterceptor interceptor1 =
+        new GoogleCloudStorageClientGrpcDownscopingInterceptor(accessBoundaries -> "token1");
+    GoogleCloudStorageClientGrpcDownscopingInterceptor interceptor2 =
+        new GoogleCloudStorageClientGrpcDownscopingInterceptor(accessBoundaries -> "token2");
+
+    Channel interceptedChannel =
+        io.grpc.ClientInterceptors.intercept(channel, interceptor1, interceptor2);
+
+    MethodDescriptor<ReadObjectRequest, byte[]> method =
+        getMethodDescriptor(GOOGLE_STORAGE_V_2_STORAGE_READ_OBJECT);
+
+    ClientCall<ReadObjectRequest, byte[]> call =
+        interceptedChannel.newCall(method, CallOptions.DEFAULT);
+
+    call.start(listener, clientInitial);
+    call.sendMessage(
+        ReadObjectRequest.newBuilder()
+            .setBucket(handler.getFormattedBucketName())
+            .setObject(handler.getObjectName())
+            .build());
+
+    List<String> actualAuthHeaders =
+        ImmutableList.copyOf(
+            actualClientInitial
+                .get()
+                .getAll(GoogleCloudStorageClientGrpcDownscopingInterceptor.AUTH_KEY));
+
+    // Only the last interceptor's header should be present.
+    assertEquals(1, actualAuthHeaders.size());
+    assertEquals("Bearer token2", actualAuthHeaders.get(0));
   }
 
   private static MethodDescriptor getMethodDescriptor(String methodName) {

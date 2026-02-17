@@ -160,6 +160,18 @@ public class ForwardingGoogleCloudStorage implements GoogleCloudStorage {
   }
 
   @Override
+  public GoogleCloudStorageItemInfo getFolderInfo(StorageResourceId resourceId) throws IOException {
+    logger.atInfo().log("getFolderInfo(%s)", resourceId);
+    return delegate.getFolderInfo(resourceId);
+  }
+
+  @Override
+  public void createFolder(StorageResourceId resourceId, boolean recursive) throws IOException {
+    logger.atInfo().log("createFolder(%s)", resourceId);
+    delegate.createFolder(resourceId, recursive);
+  }
+
+  @Override
   public boolean isHnBucket(URI src) throws IOException {
     return delegate.isHnBucket(src);
   }
@@ -189,6 +201,12 @@ public class ForwardingGoogleCloudStorage implements GoogleCloudStorage {
         "%s.listObjectInfo(%s, %s, %s)",
         delegateClassName, bucketName, objectNamePrefix, listOptions);
     return delegate.listObjectInfo(bucketName, objectNamePrefix, listOptions);
+  }
+
+  @Override
+  public List<GoogleCloudStorageItemInfo> listObjectInfoStartingFrom(
+      String bucketName, String startOffset, ListObjectOptions listOptions) throws IOException {
+    return delegate.listObjectInfoStartingFrom(bucketName, startOffset, listOptions);
   }
 
   @Override

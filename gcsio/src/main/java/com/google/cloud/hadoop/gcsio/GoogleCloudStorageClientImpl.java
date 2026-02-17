@@ -35,8 +35,6 @@ import com.google.api.client.util.BackOff;
 import com.google.api.client.util.ExponentialBackOff;
 import com.google.api.gax.paging.Page;
 import com.google.auth.Credentials;
-import com.google.auth.oauth2.AccessToken;
-import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auto.value.AutoBuilder;
 import com.google.cloud.hadoop.util.AccessBoundary;
 import com.google.cloud.hadoop.util.AsyncWriteChannelOptions;
@@ -46,12 +44,16 @@ import com.google.cloud.hadoop.util.ErrorTypeExtractor.ErrorType;
 import com.google.cloud.hadoop.util.GoogleCloudStorageEventBus;
 import com.google.cloud.hadoop.util.GrpcErrorTypeExtractor;
 import com.google.cloud.storage.Blob;
+import com.google.cloud.storage.BlobAppendableUpload;
+import com.google.cloud.storage.BlobAppendableUpload.AppendableUploadWriteableByteChannel;
+import com.google.cloud.storage.BlobAppendableUploadConfig;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.BlobWriteSessionConfig;
 import com.google.cloud.storage.BlobWriteSessionConfigs;
 import com.google.cloud.storage.Bucket;
 import com.google.cloud.storage.BucketInfo;
+import com.google.cloud.storage.BucketInfo.HierarchicalNamespace;
 import com.google.cloud.storage.BucketInfo.LifecycleRule.LifecycleAction;
 import com.google.cloud.storage.BucketInfo.LifecycleRule.LifecycleCondition;
 import com.google.cloud.storage.CopyWriter;
@@ -71,7 +73,6 @@ import com.google.cloud.storage.Storage.CopyRequest;
 import com.google.cloud.storage.Storage.MoveBlobRequest;
 import com.google.cloud.storage.StorageClass;
 import com.google.cloud.storage.StorageException;
-import com.google.cloud.storage.StorageOptions;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Strings;
@@ -97,10 +98,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentHashMap.KeySetView;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
@@ -113,13 +118,17 @@ import javax.annotation.Nullable;
 @VisibleForTesting
 public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
   private static final String USER_AGENT = "user-agent";
+  private static final String RAPID = "RAPID";
   private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
-  // Maximum number of times to retry deletes in the case of precondition failures.
+  // Maximum number of times to retry deletes in the case of precondition
+  // failures.
   private static final int MAXIMUM_PRECONDITION_FAILURES_IN_DELETE = 4;
 
   private final GoogleCloudStorageOptions storageOptions;
-  private final Storage storage;
+  @VisibleForTesting final StorageClientWrapper storageWrapper;
+
+  private static final StorageClientProvider storageClientProvider = new StorageClientProvider();
 
   // Error extractor to map APi exception to meaningful ErrorTypes.
   private static final ErrorTypeExtractor errorExtractor = GrpcErrorTypeExtractor.INSTANCE;
@@ -148,6 +157,10 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
               .setDaemon(true)
               .build());
 
+  private ExecutorService boundedThreadPool;
+
+  private final BlockingQueue<Runnable> taskQueue = new LinkedBlockingQueue<>();
+
   private static String encodeMetadataValues(byte[] bytes) {
     return bytes == null ? null : BaseEncoding.base64().encode(bytes);
   }
@@ -164,7 +177,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
       @Nullable HttpRequestInitializer httpRequestInitializer,
       @Nullable ImmutableList<ClientInterceptor> gRPCInterceptors,
       @Nullable Function<List<AccessBoundary>, String> downscopedAccessTokenFn,
-      @Nullable ExecutorService pCUExecutorService)
+      @Nullable ExecutorService pCUExecutorService,
+      @Nullable FeatureHeaderGenerator featureHeaderGenerator)
       throws IOException {
     super(
         GoogleCloudStorageImpl.builder()
@@ -173,14 +187,21 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
             .setHttpTransport(httpTransport)
             .setHttpRequestInitializer(httpRequestInitializer)
             .setDownscopedAccessTokenFn(downscopedAccessTokenFn)
+            .setFeatureHeaderGenerator(featureHeaderGenerator)
             .build());
 
     this.storageOptions = options;
-    this.storage =
+    this.storageWrapper =
         clientLibraryStorage == null
-            ? createStorage(
-                credentials, options, gRPCInterceptors, pCUExecutorService, downscopedAccessTokenFn)
-            : clientLibraryStorage;
+            ? storageClientProvider.getStorage(
+                credentials,
+                storageOptions,
+                gRPCInterceptors,
+                pCUExecutorService,
+                downscopedAccessTokenFn,
+                featureHeaderGenerator)
+            : new StorageClientWrapper(clientLibraryStorage, storageClientProvider);
+    this.boundedThreadPool = null;
   }
 
   @Override
@@ -203,8 +224,13 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
               getWriteGeneration(resourceId, options.isOverwriteExisting()));
     }
 
-    return new GoogleCloudStorageClientWriteChannel(
-        storage, storageOptions, resourceIdWithGeneration, options);
+    if (storageOptions.isBidiEnabled()) {
+      return new GoogleCloudStorageBidiWriteChannel(
+          storageWrapper.getStorage(), storageOptions, resourceIdWithGeneration, options);
+    } else {
+      return new GoogleCloudStorageClientWriteChannel(
+          storageWrapper.getStorage(), storageOptions, resourceIdWithGeneration, options);
+    }
   }
 
   /**
@@ -221,21 +247,55 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
     BucketInfo.Builder bucketInfoBuilder =
         BucketInfo.newBuilder(bucketName).setLocation(options.getLocation());
 
-    if (options.getStorageClass() != null) {
-      bucketInfoBuilder.setStorageClass(
-          StorageClass.valueOfStrict(options.getStorageClass().toUpperCase()));
+    if (options.getZonalPlacement() != null) {
+      if (!options.getHierarchicalNamespaceEnabled()) {
+        throw new UnsupportedOperationException("Zonal buckets must have HNS Enabled.");
+      }
+      // Note: Currently StorageClass does not have RAPID as an enum value. Since at the time of
+      // writing zonal buckets only support RAPID storage class we default the storage class to
+      // RAPID whenever a zonal placement is set and the storageClass is unset or null.
+      // Having storage class set as any other value will lead to an Exception thrown.
+      // Added Check for storage class equal to RAPID set by the user for when StorageClass enum
+      // adds RAPID as a value to make sure this does not start breaking.
+      if (options.getStorageClass() != null && !RAPID.equalsIgnoreCase(options.getStorageClass())) {
+        throw new UnsupportedOperationException("Zonal bucket storage class must be RAPID");
+      }
+      // Lifecycle Configs are currently not supported by zonal buckets
+      if (options.getTtl() != null) {
+        throw new UnsupportedOperationException("Zonal buckets do not support TTL");
+      }
+
+      bucketInfoBuilder
+          .setCustomPlacementConfig(
+              BucketInfo.CustomPlacementConfig.newBuilder()
+                  .setDataLocations(ImmutableList.of(options.getZonalPlacement()))
+                  .build())
+          .setStorageClass(StorageClass.valueOf("RAPID"));
+
+      // A zonal bucket must be an HNS Bucket
+      enableHns(bucketInfoBuilder);
+    } else {
+      if (options.getStorageClass() != null) {
+        bucketInfoBuilder.setStorageClass(
+            StorageClass.valueOfStrict(options.getStorageClass().toUpperCase()));
+      }
+      if (options.getHierarchicalNamespaceEnabled()) {
+        enableHns(bucketInfoBuilder);
+      }
+
+      if (options.getTtl() != null) {
+        bucketInfoBuilder.setLifecycleRules(
+            Collections.singletonList(
+                new BucketInfo.LifecycleRule(
+                    LifecycleAction.newDeleteAction(),
+                    LifecycleCondition.newBuilder()
+                        .setAge(toIntExact(options.getTtl().toDays()))
+                        .build())));
+      }
     }
-    if (options.getTtl() != null) {
-      bucketInfoBuilder.setLifecycleRules(
-          Collections.singletonList(
-              new BucketInfo.LifecycleRule(
-                  LifecycleAction.newDeleteAction(),
-                  LifecycleCondition.newBuilder()
-                      .setAge(toIntExact(options.getTtl().toDays()))
-                      .build())));
-    }
+
     try {
-      storage.create(bucketInfoBuilder.build());
+      storageWrapper.create(bucketInfoBuilder.build());
     } catch (StorageException e) {
       GoogleCloudStorageEventBus.postOnException();
       if (errorExtractor.bucketAlreadyExists(e)) {
@@ -245,6 +305,15 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
       }
       throw new IOException(e);
     }
+  }
+
+  private void enableHns(BucketInfo.Builder bucketInfoBuilder) {
+    bucketInfoBuilder
+        .setIamConfiguration(
+            BucketInfo.IamConfiguration.newBuilder()
+                .setIsUniformBucketLevelAccessEnabled(true)
+                .build())
+        .setHierarchicalNamespace(HierarchicalNamespace.newBuilder().setEnabled(true).build());
   }
 
   /**
@@ -310,7 +379,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
       return;
     }
 
-    // Don't go through batch interface for a single-item case to avoid batching overhead.
+    // Don't go through batch interface for a single-item case to avoid batching
+    // overhead.
     if (resourceIds.size() == 1) {
       createEmptyObject(Iterables.getOnlyElement(resourceIds), options);
       return;
@@ -375,7 +445,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
   }
 
   private void createEmptyObjectInternal(
-      StorageResourceId resourceId, CreateObjectOptions createObjectOptions) {
+      StorageResourceId resourceId, CreateObjectOptions createObjectOptions) throws IOException {
     Map<String, String> rewrittenMetadata = encodeMetadata(createObjectOptions.getMetadata());
 
     List<BlobTargetOption> blobTargetOptions = new ArrayList<>();
@@ -391,13 +461,63 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
           BlobTargetOption.encryptionKey(storageOptions.getEncryptionKey().value()));
     }
 
-    storage.create(
-        BlobInfo.newBuilder(BlobId.of(resourceId.getBucketName(), resourceId.getObjectName()))
-            .setMetadata(rewrittenMetadata)
-            .setContentEncoding(createObjectOptions.getContentEncoding())
-            .setContentType(createObjectOptions.getContentType())
-            .build(),
-        blobTargetOptions.toArray(BlobTargetOption[]::new));
+    Bucket bucket = getBucket(resourceId.getBucketName());
+    boolean isRapid =
+        bucket != null
+            && bucket.getStorageClass() != null
+            && "RAPID".equalsIgnoreCase(bucket.getStorageClass().toString());
+    if (isRapid) {
+      createAppendableEmptyObject(resourceId, createObjectOptions, rewrittenMetadata);
+    } else {
+      storageWrapper.create(
+          BlobInfo.newBuilder(BlobId.of(resourceId.getBucketName(), resourceId.getObjectName()))
+              .setMetadata(rewrittenMetadata)
+              .setContentEncoding(createObjectOptions.getContentEncoding())
+              .setContentType(createObjectOptions.getContentType())
+              .build(),
+          blobTargetOptions.toArray(BlobTargetOption[]::new));
+    }
+  }
+
+  private void createAppendableEmptyObject(
+      StorageResourceId resourceId,
+      CreateObjectOptions createObjectOptions,
+      Map<String, String> rewrittenMetadata)
+      throws IOException {
+    try {
+      BlobAppendableUpload upload =
+          storageWrapper.blobAppendableUpload(
+              BlobInfo.newBuilder(BlobId.of(resourceId.getBucketName(), resourceId.getObjectName()))
+                  .setMetadata(rewrittenMetadata)
+                  .setContentEncoding(createObjectOptions.getContentEncoding())
+                  .setContentType(createObjectOptions.getContentType())
+                  .build(),
+              BlobAppendableUploadConfig.of(),
+              Storage.BlobWriteOption.doesNotExist());
+      try (AppendableUploadWriteableByteChannel channel = upload.open(); ) {
+        channel.write(java.nio.ByteBuffer.wrap(new byte[0]));
+        channel.finalizeAndClose();
+      }
+    } catch (IOException e) {
+      // Check if the cause is a StorageException.
+      if (e.getCause() instanceof StorageException) {
+        StorageException storageException = (StorageException) e.getCause();
+        throwIfFileAlreadyExistsError(storageException, resourceId);
+        throw storageException;
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  private void throwIfFileAlreadyExistsError(
+      StorageException storageException, StorageResourceId resourceId)
+      throws FileAlreadyExistsException {
+    if (errorExtractor.getErrorType(storageException) == ErrorType.FAILED_PRECONDITION) {
+      // This is the expected error when the object already exists. Translate it to the
+      // exception that the calling method expects, similar to storage.create() exceptions.
+      throw new FileAlreadyExistsException(String.format("Object %s already exists.", resourceId));
+    }
   }
 
   /**
@@ -431,7 +551,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
           try {
             sleeper.sleep(nextSleep);
           } catch (InterruptedException e) {
-            // We caught an InterruptedException, we should set the interrupted bit on this thread.
+            // We caught an InterruptedException, we should set the interrupted bit on this
+            // thread.
             Thread.currentThread().interrupt();
             nextSleep = BackOff.STOP;
           }
@@ -440,7 +561,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
         nextSleep = nextSleep == BackOff.STOP ? BackOff.STOP : backOff.nextBackOffMillis();
       } while (!existingInfo.exists() && nextSleep != BackOff.STOP);
 
-      // Compare existence, size, and metadata; for 429 errors creating an empty object,
+      // Compare existence, size, and metadata; for 429 errors creating an empty
+      // object,
       // we don't care about metaGeneration/contentGeneration as long as the metadata
       // matches, since we don't know for sure whether our low-level request succeeded
       // first or some other client succeeded first.
@@ -548,7 +670,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
             String srcString = StringPaths.fromComponents(srcBucketName, srcObjectName);
             String dstString = StringPaths.fromComponents(srcBucketName, dstObjectName);
 
-            Blob movedBlob = storage.moveBlob(moveRequestBuilder.build());
+            Blob movedBlob = storageWrapper.moveBlob(moveRequestBuilder.build());
             if (movedBlob != null) {
               logger.atFiner().log("Successfully moved %s to %s", srcString, dstString);
             }
@@ -653,7 +775,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
             String srcString = StringPaths.fromComponents(srcBucketName, srcObjectName);
             String dstString = StringPaths.fromComponents(dstBucketName, dstObjectName);
 
-            CopyWriter copyWriter = storage.copy(copyRequestBuilder.build());
+            CopyWriter copyWriter = storageWrapper.copy(copyRequestBuilder.build());
             while (!copyWriter.isDone()) {
               copyWriter.copyChunk();
               logger.atFinest().log(
@@ -750,7 +872,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
     List<Bucket> allBuckets = new ArrayList<>();
     try {
       Page<Bucket> buckets =
-          storage.list(
+          storageWrapper.list(
               BucketListOption.pageSize(storageOptions.getMaxListItemsPerCall()),
               BucketListOption.fields(
                   BucketField.LOCATION,
@@ -836,18 +958,19 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
     if (resourceId.hasGenerationId()) {
       batchExecutor.queue(
           () ->
-              storage.delete(
+              storageWrapper.delete(
                   BlobId.of(bucketName, objectName),
                   BlobSourceOption.generationMatch(resourceId.getGenerationId())),
           getObjectDeletionCallback(
               resourceId, innerExceptions, batchExecutor, attempt, resourceId.getGenerationId()));
 
     } else {
-      // We first need to get the current object version to issue a safe delete for only the latest
+      // We first need to get the current object version to issue a safe delete for
+      // only the latest
       // version of the object.
       batchExecutor.queue(
           () ->
-              storage.get(
+              storageWrapper.get(
                   BlobId.of(bucketName, objectName), BlobGetOption.fields(BlobField.GENERATION)),
           new FutureCallback<>() {
             @Override
@@ -862,7 +985,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
               long generation = checkNotNull(blob.getGeneration(), "generation can not be null");
               batchExecutor.queue(
                   () ->
-                      storage.delete(
+                      storageWrapper.delete(
                           BlobId.of(bucketName, objectName),
                           BlobSourceOption.generationMatch(generation)),
                   getObjectDeletionCallback(
@@ -891,9 +1014,12 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
       public void onSuccess(Boolean result) {
         if (!result) {
           // Ignore item-not-found scenario. We do not have to delete what we cannot find.
-          // This situation typically shows up when we make a request to delete something and the
-          // server receives the request, but we get a retry-able error before we get a response.
-          // During a retry, we no longer find the item because the server had deleted it already.
+          // This situation typically shows up when we make a request to delete something
+          // and the
+          // server receives the request, but we get a retry-able error before we get a
+          // response.
+          // During a retry, we no longer find the item because the server had deleted it
+          // already.
           logger.atFiner().log("Delete object %s not found.", resourceId);
         } else {
           logger.atFiner().log("Successfully deleted %s at generation %s", resourceId, generation);
@@ -937,7 +1063,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
 
     for (String bucketName : bucketNames) {
       try {
-        boolean isDeleted = storage.delete(bucketName);
+        boolean isDeleted = storageWrapper.delete(bucketName);
         if (!isDeleted) {
           innerExceptions.add(createFileNotFoundException(bucketName, null, null));
         }
@@ -967,7 +1093,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
         new ConcurrentHashMap<>(resourceIds.size());
     Set<IOException> innerExceptions = newConcurrentHashSet();
     BatchExecutor executor = new BatchExecutor(storageOptions.getBatchThreads());
-    // For each resourceId, we'll either directly add ROOT_INFO, enqueue a Bucket fetch request,
+    // For each resourceId, we'll either directly add ROOT_INFO, enqueue a Bucket
+    // fetch request,
     // or enqueue a StorageObject fetch request.
     try {
       for (StorageResourceId resourceId : resourceIds) {
@@ -1002,7 +1129,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
       sortedItemInfos.add(itemInfos.get(resourceId));
     }
 
-    // We expect the return list to be the same size, even if some entries were "not found".
+    // We expect the return list to be the same size, even if some entries were "not
+    // found".
     checkState(
         sortedItemInfos.size() == resourceIds.size(),
         "sortedItemInfos.size() (%s) != resourceIds.size() (%s). infos: %s, ids: %s",
@@ -1118,7 +1246,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
     logger.atFiner().log("getBucket(%s)", bucketName);
     checkArgument(!isNullOrEmpty(bucketName), "bucketName must not be null or empty");
     try {
-      return storage.get(bucketName);
+      return storageWrapper.get(bucketName);
     } catch (StorageException e) {
       GoogleCloudStorageEventBus.postOnException();
       if (errorExtractor.getErrorType(e) == ErrorType.NOT_FOUND) {
@@ -1144,7 +1272,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
     Blob blob;
     try {
       blob =
-          storage.get(
+          storageWrapper.get(
               BlobId.of(bucketName, objectName),
               BlobGetOption.fields(BLOB_FIELDS.toArray(new BlobField[0])));
     } catch (StorageException e) {
@@ -1180,19 +1308,53 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
       GoogleCloudStorageItemInfo itemInfo,
       GoogleCloudStorageReadOptions readOptions)
       throws IOException {
-    return new GoogleCloudStorageClientReadChannel(
-        storage,
-        itemInfo == null ? getItemInfo(resourceId) : itemInfo,
-        readOptions,
-        errorExtractor,
-        storageOptions);
+    GoogleCloudStorageItemInfo gcsItemInfo = itemInfo;
+    if (gcsItemInfo == null
+        && (storageOptions.isBidiEnabled() || readOptions.isFastFailOnNotFoundEnabled())) {
+      gcsItemInfo = getItemInfo(resourceId);
+    }
+    // TODO(dhritichorpa) Microbenchmark the latency of using
+    // storage.get(gcsItemInfo.getBucketName()).getLocationType() here instead of
+    // flag
+    if (storageOptions.isBidiEnabled()) {
+      return new GoogleCloudStorageBidiReadChannel(
+          storageWrapper.getStorage(),
+          gcsItemInfo,
+          readOptions,
+          getBoundedThreadPool(readOptions.getBidiThreadCount()));
+    } else {
+      return new GoogleCloudStorageClientReadChannel(
+          storageWrapper.getStorage(),
+          resourceId,
+          gcsItemInfo,
+          readOptions,
+          errorExtractor,
+          storageOptions);
+    }
+  }
+
+  private ExecutorService getBoundedThreadPool(int bidiThreadCount) {
+    if (boundedThreadPool == null) {
+      boundedThreadPool =
+          new ThreadPoolExecutor(
+              bidiThreadCount,
+              bidiThreadCount,
+              0L,
+              TimeUnit.MILLISECONDS,
+              taskQueue,
+              new ThreadFactoryBuilder()
+                  .setNameFormat("bidiRead-range-pool-%d")
+                  .setDaemon(true)
+                  .build());
+    }
+    return boundedThreadPool;
   }
 
   @Override
   public void close() {
     try {
       try {
-        storage.close();
+        storageWrapper.close();
       } catch (Exception e) {
         logger.atWarning().withCause(e).log("Error occurred while closing the storage client");
       }
@@ -1200,6 +1362,9 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
         super.close();
       } finally {
         backgroundTasksThreadPool.shutdown();
+        if (boundedThreadPool != null) {
+          boundedThreadPool.shutdown();
+        }
       }
     } finally {
       backgroundTasksThreadPool = null;
@@ -1238,7 +1403,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
             BlobInfo.newBuilder(bucketName, blobName).setMetadata(rewrittenMetadata).build();
 
         executor.queue(
-            () -> storage.update(blobUpdate),
+            () -> storageWrapper.update(blobUpdate),
             new FutureCallback<>() {
               @Override
               public void onSuccess(Blob blob) {
@@ -1284,7 +1449,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
       sortedItemInfos.add(resultItemInfos.get(itemInfo.getStorageResourceId()));
     }
 
-    // We expect the return list to be the same size, even if some entries were "not found".
+    // We expect the return list to be the same size, even if some entries were "not
+    // found".
     checkState(
         sortedItemInfos.size() == itemInfoList.size(),
         "sortedItemInfos.size() (%s) != resourceIds.size() (%s). infos: %s, updateItemInfos: %s",
@@ -1354,7 +1520,7 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
 
     Blob composedBlob;
     try {
-      composedBlob = storage.compose(request);
+      composedBlob = storageWrapper.compose(request);
     } catch (StorageException e) {
       GoogleCloudStorageEventBus.postOnException();
       throw new IOException(e);
@@ -1390,66 +1556,33 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
     throw new FileAlreadyExistsException(String.format("Object %s already exists.", resourceId));
   }
 
-  private static Storage createStorage(
-      Credentials credentials,
-      GoogleCloudStorageOptions storageOptions,
-      List<ClientInterceptor> interceptors,
-      ExecutorService pCUExecutorService,
-      Function<List<AccessBoundary>, String> downscopedAccessTokenFn)
-      throws IOException {
-    final ImmutableMap<String, String> headers = getUpdatedHeadersWithUserAgent(storageOptions);
-    return StorageOptions.grpc()
-        .setAttemptDirectPath(storageOptions.isDirectPathPreferred())
-        .setHeaderProvider(() -> headers)
-        .setGrpcInterceptorProvider(
-            () -> {
-              List<ClientInterceptor> list = new ArrayList<>();
-              if (interceptors != null && !interceptors.isEmpty()) {
-                list.addAll(
-                    interceptors.stream().filter(x -> x != null).collect(Collectors.toList()));
-              }
-              if (storageOptions.isTraceLogEnabled()) {
-                list.add(new GoogleCloudStorageClientGrpcTracingInterceptor());
-              }
-
-              if (downscopedAccessTokenFn != null) {
-                // When downscoping is enabled, we need to set the downscoped token for each
-                // request. In the case of gRPC, the downscoped token will be set from the
-                // Interceptor.
-                list.add(
-                    new GoogleCloudStorageClientGrpcDownscopingInterceptor(
-                        downscopedAccessTokenFn));
-              }
-
-              list.add(new GoogleCloudStorageClientGrpcStatisticsInterceptor());
-              return ImmutableList.copyOf(list);
-            })
-        .setCredentials(
-            credentials != null ? credentials : getNoCredentials(downscopedAccessTokenFn))
-        .setBlobWriteSessionConfig(
-            getSessionConfig(storageOptions.getWriteChannelOptions(), pCUExecutorService))
-        .setProjectId(storageOptions.getProjectId())
-        .build()
-        .getService();
-  }
-
-  private static ImmutableMap<String, String> getUpdatedHeadersWithUserAgent(
-      GoogleCloudStorageOptions storageOptions) {
+  static ImmutableMap<String, String> getUpdatedHeaders(
+      GoogleCloudStorageOptions storageOptions, FeatureHeaderGenerator featureHeaderGenerator) {
     ImmutableMap<String, String> httpRequestHeaders =
         MoreObjects.firstNonNull(storageOptions.getHttpRequestHeaders(), ImmutableMap.of());
     String appName = storageOptions.getAppName();
+    ImmutableMap.Builder<String, String> headersBuilder =
+        ImmutableMap.<String, String>builder().putAll(httpRequestHeaders);
     if (!httpRequestHeaders.containsKey(USER_AGENT) && !Strings.isNullOrEmpty(appName)) {
       logger.atFiner().log("Setting useragent %s", appName);
-      return ImmutableMap.<String, String>builder()
-          .putAll(httpRequestHeaders)
-          .put(USER_AGENT, appName)
-          .build();
+      headersBuilder.put(USER_AGENT, appName);
     }
-
-    return httpRequestHeaders;
+    if (featureHeaderGenerator == null) {
+      return headersBuilder.build();
+    }
+    String featureHeaderString = featureHeaderGenerator.getValue();
+    if (httpRequestHeaders.containsKey(FeatureHeaderGenerator.HEADER_NAME)) {
+      logger.atFiner().log(
+          "Not setting feature usage header, unexpectedly already set to %s",
+          httpRequestHeaders.get(FeatureHeaderGenerator.HEADER_NAME));
+    } else if (!Strings.isNullOrEmpty(featureHeaderString)) {
+      logger.atFiner().log("Setting feature usage header %s", featureHeaderString);
+      headersBuilder.put(FeatureHeaderGenerator.HEADER_NAME, featureHeaderString);
+    }
+    return headersBuilder.build();
   }
 
-  private static BlobWriteSessionConfig getSessionConfig(
+  static BlobWriteSessionConfig getSessionConfig(
       AsyncWriteChannelOptions writeOptions, ExecutorService pCUExecutorService)
       throws IOException {
     logger.atFiner().log("Upload strategy in use: %s", writeOptions.getUploadType());
@@ -1571,17 +1704,6 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
         new VerificationAttributes(md5Hash, crc32c));
   }
 
-  private static Credentials getNoCredentials(
-      Function<List<AccessBoundary>, String> downscopedAccessTokenFn) {
-    if (downscopedAccessTokenFn == null) {
-      return null;
-    }
-
-    // Workaround for https://github.com/googleapis/sdk-platform-java/issues/2356. Once this is
-    // fixed, change this to return NoCredentials.getInstance();
-    return GoogleCredentials.create(new AccessToken("", null));
-  }
-
   public static Builder builder() {
     return new AutoBuilder_GoogleCloudStorageClientImpl_Builder();
   }
@@ -1601,6 +1723,9 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage {
 
     public abstract Builder setDownscopedAccessTokenFn(
         @Nullable Function<List<AccessBoundary>, String> downscopedAccessTokenFn);
+
+    public abstract Builder setFeatureHeaderGenerator(
+        @Nullable FeatureHeaderGenerator featureHeaderGenerator);
 
     public abstract Builder setGRPCInterceptors(
         @Nullable ImmutableList<ClientInterceptor> gRPCInterceptors);

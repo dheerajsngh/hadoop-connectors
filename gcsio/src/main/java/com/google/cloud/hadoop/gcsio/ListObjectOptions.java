@@ -16,6 +16,7 @@
 
 package com.google.cloud.hadoop.gcsio;
 
+import static com.google.cloud.hadoop.gcsio.GoogleCloudStorage.LIST_MAX_RESULTS;
 import static com.google.cloud.hadoop.gcsio.GoogleCloudStorage.MAX_RESULTS_UNLIMITED;
 import static com.google.cloud.hadoop.gcsio.GoogleCloudStorage.PATH_DELIMITER;
 import static com.google.cloud.hadoop.gcsio.GoogleCloudStorageImpl.OBJECT_FIELDS;
@@ -30,6 +31,10 @@ public abstract class ListObjectOptions {
   /** List all objects in the directory. */
   public static final ListObjectOptions DEFAULT = builder().build();
 
+  /** List objects starting from an offset. */
+  public static final ListObjectOptions DEFAULT_USING_START_OFFSET =
+      builder().setDelimiter(null).setMaxResults(LIST_MAX_RESULTS).build();
+
   /** List all objects with the prefix. */
   public static final ListObjectOptions DEFAULT_FLAT_LIST = builder().setDelimiter(null).build();
 
@@ -37,6 +42,7 @@ public abstract class ListObjectOptions {
     return new AutoValue_ListObjectOptions.Builder()
         .setDelimiter(PATH_DELIMITER)
         .setIncludePrefix(false)
+        .setIncludeFoldersAsPrefixes(false)
         .setMaxResults(MAX_RESULTS_UNLIMITED)
         .setFields(OBJECT_FIELDS);
   }
@@ -49,6 +55,9 @@ public abstract class ListObjectOptions {
 
   /** Whether to include prefix object in the result. */
   public abstract boolean isIncludePrefix();
+
+  /** Whether to include empty folders in the result. */
+  public abstract boolean isIncludeFoldersAsPrefixes();
 
   /** Maximum number of results to return, unlimited if negative or zero. */
   public abstract long getMaxResults();
@@ -69,6 +78,8 @@ public abstract class ListObjectOptions {
     public abstract Builder setDelimiter(String delimiter);
 
     public abstract Builder setIncludePrefix(boolean includePrefix);
+
+    public abstract Builder setIncludeFoldersAsPrefixes(boolean includeFoldersAsPrefixes);
 
     public abstract Builder setMaxResults(long maxResults);
 

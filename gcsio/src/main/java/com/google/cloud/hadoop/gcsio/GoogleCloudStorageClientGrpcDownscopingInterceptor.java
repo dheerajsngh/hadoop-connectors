@@ -1,3 +1,19 @@
+/*
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.google.cloud.hadoop.gcsio;
 
 import static com.google.auth.http.AuthHttpConstants.AUTHORIZATION;
@@ -124,7 +140,9 @@ class GoogleCloudStorageClientGrpcDownscopingInterceptor implements ClientInterc
         String token = getDownScopedToken(message);
         if (token != null) {
           logger.atFinest().log("Setting down-scoped auth token");
-          headers.put(AUTH_KEY, "Bearer " + token);
+          if (!headers.containsKey(AUTH_KEY)) {
+            headers.put(AUTH_KEY, "Bearer " + token);
+          }
         }
       }
 
@@ -152,7 +170,7 @@ class GoogleCloudStorageClientGrpcDownscopingInterceptor implements ClientInterc
           com.google.storage.v2.Object obj = writeObjectSpec.getResource();
 
           String theBucket = obj.getBucket();
-          if (theBucket == null || theBucket.length() == 0) {
+          if (theBucket.length() == 0) {
             // TODO: Check why this is required.
             return ImmutableList.of();
           }

@@ -27,8 +27,14 @@ import static com.google.cloud.hadoop.gcsio.integration.GoogleCloudStorageTestHe
 import static com.google.common.truth.Truth.assertThat;
 import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.fail;
 
+import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
 import com.google.api.client.googleapis.json.GoogleJsonResponseException;
+import com.google.api.client.http.HttpRequestInitializer;
+import com.google.api.client.http.HttpTransport;
+import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.services.storage.Storage;
 import com.google.auth.Credentials;
 import com.google.cloud.hadoop.gcsio.AssertingLogHandler;
 import com.google.cloud.hadoop.gcsio.CreateBucketOptions;
@@ -40,16 +46,19 @@ import com.google.cloud.hadoop.gcsio.GoogleCloudStorageImpl;
 import com.google.cloud.hadoop.gcsio.GoogleCloudStorageItemInfo;
 import com.google.cloud.hadoop.gcsio.GoogleCloudStorageOptions;
 import com.google.cloud.hadoop.gcsio.GoogleCloudStorageReadOptions;
+import com.google.cloud.hadoop.gcsio.ListObjectOptions;
 import com.google.cloud.hadoop.gcsio.StorageResourceId;
 import com.google.cloud.hadoop.gcsio.TrackingGrpcRequestInterceptor;
 import com.google.cloud.hadoop.gcsio.TrackingHttpRequestInitializer;
 import com.google.cloud.hadoop.gcsio.integration.GoogleCloudStorageTestHelper.TestBucketHelper;
 import com.google.cloud.hadoop.gcsio.integration.GoogleCloudStorageTestHelper.TrackingStorageWrapper;
 import com.google.cloud.hadoop.util.AsyncWriteChannelOptions;
+import com.google.cloud.hadoop.util.RetryHttpInitializer;
 import com.google.cloud.storage.StorageException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.WritableByteChannel;
@@ -58,6 +67,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
@@ -123,6 +133,13 @@ public class GoogleCloudStorageImplTest {
     }
   }
 
+  private String createHnsBucket() throws IOException {
+    String hnsBucket = bucketHelper.getUniqueBucketName("create-folder-tests");
+    helperGcs.createBucket(
+        hnsBucket, CreateBucketOptions.builder().setHierarchicalNamespaceEnabled(true).build());
+    return hnsBucket;
+  }
+
   @Test
   public void open_lazyInit_whenFastFailOnNotFound_isFalse() throws IOException {
     int expectedSize = 5 * 1024 * 1024;
@@ -143,12 +160,11 @@ public class GoogleCloudStorageImplTest {
 
     String filelds = "contentEncoding,generation,size";
     if (testStorageClientImpl) {
-      // fail fast is not supported via java-storage as of now, overriding with default values.
-      filelds = OBJECT_FIELDS;
+      assertThat(trackingGcs.getAllRequestStrings()).containsExactly("rpcMethod:GetObject");
+    } else {
+      assertThat(trackingGcs.getAllRequestStrings())
+          .containsExactly(getObjectRequestString(resourceId, filelds, testStorageClientImpl));
     }
-
-    assertThat(trackingGcs.getAllRequestStrings())
-        .containsExactly(getObjectRequestString(resourceId, filelds, testStorageClientImpl));
     trackingGcs.delegate.close();
   }
 
@@ -531,6 +547,36 @@ public class GoogleCloudStorageImplTest {
   }
 
   @Test
+  public void listObjectInfoStartingFrom_lexicographicalOrdrer() throws IOException {
+    String testDirectory = name.getMethodName();
+
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+    StorageResourceId resourceId3 = new StorageResourceId(testBucket, testDirectory + "/object3");
+    StorageResourceId resourceId2 = new StorageResourceId(testBucket, testDirectory + "/object2");
+    StorageResourceId resourceId1 = new StorageResourceId(testBucket, testDirectory + "/object1");
+
+    trackingGcs.delegate.createEmptyObject(resourceId3);
+    trackingGcs.delegate.createEmptyObject(resourceId2);
+    trackingGcs.delegate.createEmptyObject(resourceId1);
+
+    // Verify that directory object not listed
+    List<GoogleCloudStorageItemInfo> listedItems =
+        helperGcs.listObjectInfoStartingFrom(testBucket, testDirectory + "/");
+    assertThat(listedItems.stream().map(GoogleCloudStorageItemInfo::getResourceId).toArray())
+        .asList()
+        .containsExactlyElementsIn(
+            ImmutableList.builder()
+                .add(resourceId1)
+                .add(resourceId2)
+                .add(resourceId3)
+                .build()
+                .toArray())
+        .inOrder();
+    trackingGcs.delegate.close();
+  }
+
+  @Test
   public void create_doesNotRepairImplicitDirectories() throws IOException {
     String testDirectory = name.getMethodName();
     StorageResourceId resourceId = new StorageResourceId(testBucket, testDirectory + "/obj");
@@ -554,10 +600,232 @@ public class GoogleCloudStorageImplTest {
     assertThat(trackingGcs.requestsTracker.getAllRequestInvocationIds().size())
         .isEqualTo(trackingGcs.requestsTracker.getAllRequests().size());
 
-    assertThat(trackingGcs.getAllRequestStrings())
+    List<String> requests = trackingGcs.getAllRequestStrings();
+    String writeObjectRequest =
+        emptyUploadRequestString(
+            resourceId.getBucketName(), resourceId.getObjectName(), testStorageClientImpl);
+
+    // The GetBucket call is introduced in the ClientImpl to add support for RAPID storage
+    // zonal buckets and does not exist in the HTTP route.
+    switch (requests.size()) {
+      case 1:
+        // SCENARIO 1:  Only the object creation call was made.
+        assertThat(requests).containsExactly(writeObjectRequest);
+        break;
+      case 2:
+        // SCENARIO 2: GetBucket was called first, then the object creation.
+        assertThat(requests).containsExactly("rpcMethod:GetBucket", writeObjectRequest).inOrder();
+        break;
+      default:
+        // If we get 0 or >2 requests, the test has failed.
+        fail(
+            "Expected 1 or 2  RPC calls, but got "
+                + requests.size()
+                + ". Requests were: "
+                + requests);
+    }
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void testCreateFolder_nonRecursive_Success() throws IOException {
+    String hnsBucket = createHnsBucket();
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+    StorageResourceId folderId = new StorageResourceId(hnsBucket, "new-folder/");
+
+    helperGcs.createFolder(folderId, /* recursive= */ false);
+
+    GoogleCloudStorageItemInfo folderInfo = helperGcs.getFolderInfo(folderId);
+    assertThat(folderInfo.exists()).isTrue();
+    assertThat(folderInfo.isNativeHNSFolder()).isTrue();
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void testCreateFolder_nonRecursive_alreadyExists_throwsError() throws IOException {
+    String hnsBucket = createHnsBucket();
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+    StorageResourceId folderId = new StorageResourceId(hnsBucket, "existing-folder/");
+
+    // Create it once, which should succeed.
+    helperGcs.createFolder(folderId, /* recursive= */ false);
+
+    // Attempt to create it again.
+    assertThrows(
+        java.nio.file.FileAlreadyExistsException.class,
+        () -> helperGcs.createFolder(folderId, /* recursive= */ false));
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void testCreateFolder_nonRecursive_conflictingObject_throwsError() throws IOException {
+    String hnsBucket = createHnsBucket();
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+    // Create an object with a name that looks like a folder.
+    StorageResourceId objectId = new StorageResourceId(hnsBucket, "conflicting-object/");
+    helperGcs.createEmptyObject(objectId);
+
+    // Attempt to create a folder with the same name.
+    assertThrows(
+        java.nio.file.FileAlreadyExistsException.class,
+        () -> helperGcs.createFolder(objectId, /* recursive= */ false));
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void testCreateFolder_recursive_Success() throws IOException {
+    String hnsBucket = createHnsBucket();
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+    StorageResourceId folderId = new StorageResourceId(hnsBucket, "a/b/c/");
+
+    // Create a nested folder structure recursively.
+    helperGcs.createFolder(folderId, /* recursive= */ true);
+
+    // Verify all parts of the path now exist as folders.
+    GoogleCloudStorageItemInfo folderA =
+        helperGcs.getFolderInfo(new StorageResourceId(hnsBucket, "a/"));
+    GoogleCloudStorageItemInfo folderB =
+        helperGcs.getFolderInfo(new StorageResourceId(hnsBucket, "a/b/"));
+    GoogleCloudStorageItemInfo folderC =
+        helperGcs.getFolderInfo(new StorageResourceId(hnsBucket, "a/b/c/"));
+
+    assertThat(folderA.isNativeHNSFolder()).isTrue();
+    assertThat(folderB.isNativeHNSFolder()).isTrue();
+    assertThat(folderC.isNativeHNSFolder()).isTrue();
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void testCreateFolder_recursive_alreadyExists_isIdempotent() throws IOException {
+    String hnsBucket = createHnsBucket();
+    StorageResourceId folderId = new StorageResourceId(hnsBucket, "a/b/");
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+
+    // Create the folder structure.
+    helperGcs.createFolder(folderId, /* recursive= */ true);
+    GoogleCloudStorageItemInfo infoBefore = helperGcs.getFolderInfo(folderId);
+
+    // Attempt to create it again recursively, which should throw FileAlreadyExistsException error.
+    assertThrows(
+        java.nio.file.FileAlreadyExistsException.class,
+        () -> helperGcs.createFolder(folderId, /* recursive= */ true));
+
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void testCreateFolder_recursive_conflictingObject_throwsError() throws IOException {
+    String hnsBucket = createHnsBucket();
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+    StorageResourceId objectId = new StorageResourceId(hnsBucket, "a/b/c/");
+    StorageResourceId folderToCreateId = new StorageResourceId(hnsBucket, "a/b/c/");
+
+    // Create a placeholder object.
+    helperGcs.createEmptyObject(objectId);
+
+    // Attempting to create a folder will fail
+    assertThrows(
+        java.nio.file.FileAlreadyExistsException.class,
+        () -> helperGcs.createFolder(folderToCreateId, /* recursive= */ true));
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void listObjectInfo_withFoldersAsPrefixes_returnsFolders() throws IOException {
+    String hnsBucket = bucketHelper.getUniqueBucketPrefix() + "-hns";
+    helperGcs.createBucket(
+        hnsBucket, CreateBucketOptions.builder().setHierarchicalNamespaceEnabled(true).build());
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+
+    StorageResourceId root = new StorageResourceId(hnsBucket);
+    StorageResourceId folderId = new StorageResourceId(hnsBucket, "test-dir/");
+    StorageResourceId objectInFolderId = new StorageResourceId(hnsBucket, "test-dir/file.txt");
+    StorageResourceId rootObjectId = new StorageResourceId(hnsBucket, "root-file.txt");
+
+    helperGcs.createFolder(folderId, false);
+    helperGcs.createEmptyObject(objectInFolderId);
+    helperGcs.createEmptyObject(rootObjectId);
+
+    ListObjectOptions listOptions =
+        ListObjectOptions.DEFAULT.toBuilder()
+            .setIncludePrefix(true)
+            .setIncludeFoldersAsPrefixes(true)
+            .build();
+    List<GoogleCloudStorageItemInfo> items =
+        helperGcs.listObjectInfo(root.getBucketName(), root.getObjectName(), listOptions);
+    List<String> objectNames =
+        items.stream().map(GoogleCloudStorageItemInfo::getObjectName).collect(toList());
+
+    assertThat(objectNames).containsExactly(rootObjectId.getObjectName(), folderId.getObjectName());
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void listObjectInfo_withoutFoldersAsPrefixes_doesNotReturnFolders() throws IOException {
+    String hnsBucket = bucketHelper.getUniqueBucketPrefix() + "-hns";
+    helperGcs.createBucket(
+        hnsBucket, CreateBucketOptions.builder().setHierarchicalNamespaceEnabled(true).build());
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+
+    StorageResourceId root = new StorageResourceId(hnsBucket);
+    StorageResourceId folderId = new StorageResourceId(hnsBucket, "native-directory/");
+    StorageResourceId placeholderId = new StorageResourceId(hnsBucket, "placeholder-directory/");
+    StorageResourceId rootObjectId = new StorageResourceId(hnsBucket, "root-file.txt");
+
+    helperGcs.createFolder(folderId, false);
+    helperGcs.createEmptyObject(placeholderId);
+    helperGcs.createEmptyObject(rootObjectId);
+
+    ListObjectOptions listOptions =
+        ListObjectOptions.DEFAULT.toBuilder().setIncludePrefix(true).build();
+    List<GoogleCloudStorageItemInfo> items =
+        helperGcs.listObjectInfo(root.getBucketName(), root.getObjectName(), listOptions);
+    List<String> objectNames =
+        items.stream().map(GoogleCloudStorageItemInfo::getObjectName).collect(toList());
+
+    assertThat(objectNames)
+        .containsExactly(rootObjectId.getObjectName(), placeholderId.getObjectName());
+    trackingGcs.delegate.close();
+  }
+
+  @Test
+  public void listObjectInfo_withFoldersAsPrefixes_returnFolders() throws IOException {
+    String hnsBucket = bucketHelper.getUniqueBucketPrefix() + "-hns";
+    helperGcs.createBucket(
+        hnsBucket, CreateBucketOptions.builder().setHierarchicalNamespaceEnabled(true).build());
+    TrackingStorageWrapper<GoogleCloudStorage> trackingGcs =
+        newTrackingGoogleCloudStorage(GCS_OPTIONS);
+
+    StorageResourceId root = new StorageResourceId(hnsBucket);
+    StorageResourceId folderId = new StorageResourceId(hnsBucket, "native-directory/");
+    StorageResourceId placeholderId = new StorageResourceId(hnsBucket, "placeholder-directory/");
+    StorageResourceId rootObjectId = new StorageResourceId(hnsBucket, "root-file.txt");
+
+    helperGcs.createFolder(folderId, false);
+    helperGcs.createEmptyObject(placeholderId);
+    helperGcs.createEmptyObject(rootObjectId);
+
+    ListObjectOptions listOptions =
+        ListObjectOptions.DEFAULT.toBuilder()
+            .setIncludePrefix(true)
+            .setIncludeFoldersAsPrefixes(true)
+            .build();
+    List<GoogleCloudStorageItemInfo> items =
+        helperGcs.listObjectInfo(root.getBucketName(), root.getObjectName(), listOptions);
+    List<String> objectNames =
+        items.stream().map(GoogleCloudStorageItemInfo::getObjectName).collect(toList());
+
+    assertThat(objectNames)
         .containsExactly(
-            emptyUploadRequestString(
-                resourceId.getBucketName(), resourceId.getObjectName(), testStorageClientImpl));
+            folderId.getObjectName(), rootObjectId.getObjectName(), placeholderId.getObjectName());
     trackingGcs.delegate.close();
   }
 
@@ -973,5 +1241,74 @@ public class GoogleCloudStorageImplTest {
     }
     return TrackingHttpRequestInitializer.getRequestString(
         resourceId.getBucketName(), resourceId.getObjectName(), fields);
+  }
+
+  @Test
+  public void listObjects_recoversFromConnectionReset_withRealGCS() throws Exception {
+    if (!testStorageClientImpl) {
+      String shortUuid = UUID.randomUUID().toString().substring(0, 8);
+      String bucketName = bucketHelper.getUniqueBucketName("retry-" + shortUuid);
+
+      helperGcs.createBucket(bucketName);
+      StorageResourceId resourceId = new StorageResourceId(bucketName, "test-object");
+      helperGcs.createEmptyObject(resourceId);
+
+      TrackingStorageWrapper<GoogleCloudStorage> trackingGcs = null;
+      try {
+        // Create the Fault Injector Transport
+        HttpTransport realTransport = GoogleNetHttpTransport.newTrustedTransport();
+        FaultInjectingHttpTransport faultyTransport =
+            new FaultInjectingHttpTransport(realTransport);
+
+        AtomicInteger requestCount = new AtomicInteger(0);
+
+        // Build the Storage Client manually
+        RetryHttpInitializer baseInitializer =
+            new RetryHttpInitializer(
+                GoogleCloudStorageTestHelper.getCredentials(),
+                GCS_OPTIONS.toRetryHttpInitializerOptions());
+
+        HttpRequestInitializer poisoningInitializer =
+            request -> {
+              baseInitializer.initialize(request);
+
+              // Insert header for the first request so that it fails and is retried
+              if (requestCount.getAndIncrement() == 0) {
+                request
+                    .getHeaders()
+                    .set(
+                        FaultInjectingHttpTransport.FAULT_HEADER_NAME,
+                        FaultInjectingHttpTransport.FAULT_CONNECTION_RESET);
+              }
+            };
+
+        Storage faultyStorageClient =
+            new Storage.Builder(
+                    faultyTransport, JacksonFactory.getDefaultInstance(), poisoningInitializer)
+                .setApplicationName("ghfs/test")
+                .build();
+
+        trackingGcs = newTrackingGoogleCloudStorage(GCS_OPTIONS);
+        // Use Reflection to GoogleCloudStorageImpl object
+        GoogleCloudStorageImpl gcsImpl = (GoogleCloudStorageImpl) trackingGcs.delegate;
+        Field storageField = GoogleCloudStorageImpl.class.getDeclaredField("storage");
+        storageField.setAccessible(true);
+        storageField.set(gcsImpl, faultyStorageClient);
+
+        // This call will go through faultyTransport -> Real GCS
+        List<GoogleCloudStorageItemInfo> results =
+            trackingGcs.delegate.listObjectInfo(bucketName, null, ListObjectOptions.DEFAULT);
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).getObjectName()).isEqualTo("test-object");
+        assertThat(faultyTransport.failureCount.get()).isAtLeast(1);
+        assertThat(requestCount.get()).isAtLeast(2);
+
+      } finally {
+        if (trackingGcs != null) {
+          trackingGcs.delegate.close();
+        }
+      }
+    }
   }
 }

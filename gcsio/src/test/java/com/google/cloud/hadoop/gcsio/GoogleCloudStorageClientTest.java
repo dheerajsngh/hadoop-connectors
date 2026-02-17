@@ -26,8 +26,11 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 
 import com.google.api.client.testing.http.MockHttpTransport;
+import com.google.api.gax.retrying.RetrySettings;
 import com.google.cloud.hadoop.util.ErrorTypeExtractor.ErrorType;
+import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageException;
+import com.google.cloud.storage.StorageOptions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
@@ -35,6 +38,7 @@ import com.google.protobuf.AbstractMessage;
 import com.google.protobuf.Empty;
 import com.google.protobuf.Timestamp;
 import com.google.storage.v2.Bucket;
+import com.google.storage.v2.Bucket.HierarchicalNamespace;
 import com.google.storage.v2.Bucket.Lifecycle;
 import com.google.storage.v2.Bucket.Lifecycle.Rule;
 import com.google.storage.v2.Bucket.Lifecycle.Rule.Action;
@@ -54,6 +58,7 @@ import io.grpc.StatusException;
 import io.grpc.StatusRuntimeException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.time.Duration;
@@ -95,6 +100,8 @@ public class GoogleCloudStorageClientTest {
 
   private static final int GENERATION = 123456;
 
+  private static final String ZONAL_PLACEMENT = "us-central1-a";
+
   private static final Bucket TEST_BUCKET =
       Bucket.newBuilder()
           .setName(TEST_BUCKET_NAME)
@@ -117,6 +124,23 @@ public class GoogleCloudStorageClientTest {
                           .setCondition(Condition.newBuilder().setAgeDays(TTL_DAYS).build())
                           .build())
                   .build())
+          .build();
+
+  private static final Bucket TEST_BUCKET_WITH_ZONAL_OPTIONS =
+      Bucket.newBuilder()
+          .setName(TEST_BUCKET_NAME)
+          .setLocation(BUCKET_LOCATION)
+          .setCustomPlacementConfig(
+              Bucket.CustomPlacementConfig.newBuilder().addDataLocations(ZONAL_PLACEMENT).build())
+          .setStorageClass("RAPID")
+          .setIamConfig(
+              Bucket.IamConfig.newBuilder()
+                  .setUniformBucketLevelAccess(
+                      Bucket.IamConfig.UniformBucketLevelAccess.newBuilder()
+                          .setEnabled(true)
+                          .build())
+                  .build())
+          .setHierarchicalNamespace(HierarchicalNamespace.newBuilder().setEnabled(true).build())
           .build();
 
   private static final Object TEST_OBJECT =
@@ -186,6 +210,136 @@ public class GoogleCloudStorageClientTest {
   }
 
   @Test
+  public void createBucket_withZonalOptions_succeeds() throws Exception {
+    mockStorage.addResponse(TEST_BUCKET_WITH_ZONAL_OPTIONS);
+
+    CreateBucketOptions bucketOptions =
+        CreateBucketOptions.builder()
+            .setLocation(BUCKET_LOCATION)
+            .setZonalPlacement(ZONAL_PLACEMENT)
+            .setStorageClass("RAPID")
+            .setHierarchicalNamespaceEnabled(true)
+            .build();
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      GoogleCloudStorage gcs =
+          mockedGcsClientImpl(transport, fakeServer.getGrpcStorageOptions().getService());
+      gcs.createBucket(TEST_BUCKET_NAME, bucketOptions);
+    }
+
+    assertEquals(mockStorage.getRequests().size(), 1);
+
+    CreateBucketRequest bucketRequest = (CreateBucketRequest) mockStorage.getRequests().get(0);
+    // Assert correct fields were set in request.
+    assertEquals(bucketRequest.getBucketId(), TEST_BUCKET_NAME);
+    assertEquals(bucketRequest.getBucket().getLocation(), BUCKET_LOCATION);
+    assertEquals(
+        bucketRequest.getBucket().getCustomPlacementConfig().getDataLocations(0), ZONAL_PLACEMENT);
+    assertEquals(bucketRequest.getBucket().getStorageClass(), "RAPID");
+    assertThat(bucketRequest.getBucket().getHierarchicalNamespace().getEnabled()).isTrue();
+    assertThat(bucketRequest.getBucket().getIamConfig().getUniformBucketLevelAccess().getEnabled())
+        .isTrue();
+    // Assert TTL was not set for zonal bucket
+    assertThat(bucketRequest.getBucket().getLifecycle().getRuleList()).isEmpty();
+  }
+
+  @Test
+  public void createBucket_withZonalUnsetStorageClass_defaultsToRapid() throws Exception {
+    mockStorage.addResponse(TEST_BUCKET_WITH_ZONAL_OPTIONS);
+
+    CreateBucketOptions bucketOptions =
+        CreateBucketOptions.builder()
+            .setLocation(BUCKET_LOCATION)
+            .setZonalPlacement(ZONAL_PLACEMENT)
+            .setHierarchicalNamespaceEnabled(true)
+            .build();
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      GoogleCloudStorage gcs =
+          mockedGcsClientImpl(transport, fakeServer.getGrpcStorageOptions().getService());
+      gcs.createBucket(TEST_BUCKET_NAME, bucketOptions);
+    }
+
+    assertEquals(mockStorage.getRequests().size(), 1);
+
+    CreateBucketRequest bucketRequest = (CreateBucketRequest) mockStorage.getRequests().get(0);
+    // Assert correct fields were set in request.
+    assertEquals(bucketRequest.getBucketId(), TEST_BUCKET_NAME);
+    assertEquals(bucketRequest.getBucket().getLocation(), BUCKET_LOCATION);
+    assertEquals(
+        bucketRequest.getBucket().getCustomPlacementConfig().getDataLocations(0), ZONAL_PLACEMENT);
+    assertEquals(bucketRequest.getBucket().getStorageClass(), "RAPID");
+    assertThat(bucketRequest.getBucket().getHierarchicalNamespace().getEnabled()).isTrue();
+    assertThat(bucketRequest.getBucket().getIamConfig().getUniformBucketLevelAccess().getEnabled())
+        .isTrue();
+    // Assert TTL was not set for zonal bucket
+    assertThat(bucketRequest.getBucket().getLifecycle().getRuleList()).isEmpty();
+  }
+
+  @Test
+  public void createBucket_zonalButHnsDisabled_throwsException() throws Exception {
+    CreateBucketOptions bucketOptions =
+        CreateBucketOptions.builder()
+            .setZonalPlacement(ZONAL_PLACEMENT)
+            .setHierarchicalNamespaceEnabled(false)
+            .build();
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      GoogleCloudStorage gcs =
+          mockedGcsClientImpl(transport, fakeServer.getGrpcStorageOptions().getService());
+
+      UnsupportedOperationException thrown =
+          assertThrows(
+              UnsupportedOperationException.class,
+              () -> gcs.createBucket(TEST_BUCKET_NAME, bucketOptions));
+      assertThat(thrown).hasMessageThat().isEqualTo("Zonal buckets must have HNS Enabled.");
+    }
+  }
+
+  @Test
+  public void createBucket_withZonalOptionsAndTtl_throwsException() throws Exception {
+    CreateBucketOptions bucketOptions =
+        CreateBucketOptions.builder()
+            .setLocation(BUCKET_LOCATION)
+            .setZonalPlacement(ZONAL_PLACEMENT)
+            .setHierarchicalNamespaceEnabled(true)
+            .setTtl(Duration.ofDays(TTL_DAYS))
+            .build();
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      GoogleCloudStorage gcs =
+          mockedGcsClientImpl(transport, fakeServer.getGrpcStorageOptions().getService());
+
+      UnsupportedOperationException thrown =
+          assertThrows(
+              UnsupportedOperationException.class,
+              () -> gcs.createBucket(TEST_BUCKET_NAME, bucketOptions));
+      assertThat(thrown).hasMessageThat().isEqualTo("Zonal buckets do not support TTL");
+    }
+  }
+
+  @Test
+  public void createBucket_zonalWithInvalidStorageClass_throwsException() throws Exception {
+    CreateBucketOptions bucketOptions =
+        CreateBucketOptions.builder()
+            .setZonalPlacement(ZONAL_PLACEMENT)
+            .setHierarchicalNamespaceEnabled(true)
+            .setStorageClass("STANDARD") // Invalid for zonal
+            .build();
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      GoogleCloudStorage gcs =
+          mockedGcsClientImpl(transport, fakeServer.getGrpcStorageOptions().getService());
+
+      UnsupportedOperationException thrown =
+          assertThrows(
+              UnsupportedOperationException.class,
+              () -> gcs.createBucket(TEST_BUCKET_NAME, bucketOptions));
+      assertThat(thrown).hasMessageThat().isEqualTo("Zonal bucket storage class must be RAPID");
+    }
+  }
+
+  @Test
   public void createBucket_throwsFileAlreadyExistsException() throws Exception {
     mockStorage.addException(new StatusRuntimeException(Status.ALREADY_EXISTS));
     try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
@@ -220,6 +374,8 @@ public class GoogleCloudStorageClientTest {
 
   @Test
   public void createEmptyObject_ignoresException() throws Exception {
+    Bucket mockBucket = mockBucket("STANDARD");
+    mockStorage.addResponse(mockBucket);
     mockStorage.addException(new StatusRuntimeException(Status.RESOURCE_EXHAUSTED));
     // Mock for getItemInfo in case the object already exists.
     mockStorage.addResponse(
@@ -231,11 +387,13 @@ public class GoogleCloudStorageClientTest {
 
       gcs.createEmptyObject(TEST_RESOURCE_ID);
     }
-    assertThat(mockStorage.getRequests().size()).isEqualTo(2);
+    assertThat(mockStorage.getRequests().size()).isEqualTo(3);
   }
 
   @Test
   public void createEmptyObject_mismatchedMetadata_doesNotIgnoreException() throws Exception {
+    Bucket mockBucket = mockBucket("STANDARD");
+    mockStorage.addResponse(mockBucket);
     mockStorage.addException(new StatusRuntimeException(Status.RESOURCE_EXHAUSTED));
     // Mock for getItemInfo in case the object already exists.
     mockStorage.addResponse(
@@ -259,6 +417,8 @@ public class GoogleCloudStorageClientTest {
 
   @Test
   public void createEmptyObject_mismatchedMetadata_ignoreException() throws Exception {
+    Bucket mockBucket = mockBucket("STANDARD");
+    mockStorage.addResponse(mockBucket);
     mockStorage.addException(new StatusRuntimeException(Status.RESOURCE_EXHAUSTED));
     // Mock for getItemInfo in case the object already exists.
     mockStorage.addResponse(
@@ -273,11 +433,13 @@ public class GoogleCloudStorageClientTest {
       // will be false, so the call will complete successfully.
       gcs.createEmptyObject(TEST_RESOURCE_ID);
     }
-    assertThat(mockStorage.getRequests().size()).isEqualTo(2);
+    assertThat(mockStorage.getRequests().size()).isEqualTo(3);
   }
 
   @Test
   public void createEmptyObject_doesNotIgnoreExceptions() throws Exception {
+    Bucket mockBucket = mockBucket("STANDARD");
+    mockStorage.addResponse(mockBucket);
     // Non-Ignorable exception.
     mockStorage.addException(new StatusRuntimeException(Status.UNAVAILABLE));
     // Mock for getItemInfo in case the object already exists.
@@ -296,6 +458,8 @@ public class GoogleCloudStorageClientTest {
 
   @Test
   public void createEmptyObject_alreadyExists_throwsException() throws Exception {
+    Bucket mockBucket = mockBucket("STANDARD");
+    mockStorage.addResponse(mockBucket);
     mockStorage.addException(new StatusRuntimeException(Status.ALREADY_EXISTS));
 
     try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
@@ -315,6 +479,9 @@ public class GoogleCloudStorageClientTest {
 
   @Test
   public void createEmptyObjects_ignoresExceptions() throws Exception {
+    Bucket mockBucket = mockBucket("STANDARD");
+    mockStorage.addResponse(mockBucket);
+    mockStorage.addResponse(mockBucket);
     mockStorage.addException(new StatusRuntimeException(Status.RESOURCE_EXHAUSTED));
     mockStorage.addException(new StatusRuntimeException(Status.RESOURCE_EXHAUSTED));
     // Mock for getItemInfo in case the object already exists.
@@ -329,11 +496,14 @@ public class GoogleCloudStorageClientTest {
 
       gcs.createEmptyObjects(ImmutableList.of(TEST_RESOURCE_ID, TEST_RESOURCE_ID));
     }
-    assertThat(mockStorage.getRequests().size()).isEqualTo(4);
+    assertThat(mockStorage.getRequests().size()).isEqualTo(6);
   }
 
   @Test
   public void createEmptyObjects_doesNotIgnoreExceptions() throws Exception {
+    Bucket mockBucket = mockBucket("STANDARD");
+    mockStorage.addResponse(mockBucket);
+    mockStorage.addResponse(mockBucket);
     mockStorage.addException(new StatusRuntimeException(Status.UNAVAILABLE));
     mockStorage.addException(new StatusRuntimeException(Status.UNAVAILABLE));
 
@@ -346,6 +516,91 @@ public class GoogleCloudStorageClientTest {
               IOException.class,
               () -> gcs.createEmptyObjects(ImmutableList.of(TEST_RESOURCE_ID, TEST_RESOURCE_ID)));
       assertThat(thrown).hasMessageThat().isEqualTo("Multiple IOExceptions.");
+    }
+  }
+
+  @Test
+  public void createEmptyObject_rapidStorage_ignoresException() throws Exception {
+    Bucket mockBucket = mockBucket("RAPID");
+    mockStorage.addResponse(mockBucket);
+
+    mockStorage.addException(new StatusRuntimeException(Status.RESOURCE_EXHAUSTED));
+    mockStorage.addException(new StatusRuntimeException(Status.RESOURCE_EXHAUSTED));
+
+    mockStorage.addResponse(
+        TEST_OBJECT.toBuilder()
+            .setSize(0L)
+            .putAllMetadata(ImmutableMap.of())
+            .setStorageClass("RAPID")
+            .build());
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      StorageOptions originalOptions = fakeServer.getGrpcStorageOptions();
+
+      // Customize RetrySettings
+      RetrySettings customRetrySettings =
+          originalOptions.getRetrySettings().toBuilder()
+              .setMaxAttempts(2) // Set max attempts to 2 (1 initial + 1 retry)
+              .build();
+
+      StorageOptions customStorageOptions =
+          originalOptions.toBuilder().setRetrySettings(customRetrySettings).build();
+
+      Storage customStorage = customStorageOptions.getService();
+
+      GoogleCloudStorage gcs = mockedGcsClientImpl(transport, customStorage);
+
+      gcs.createEmptyObject(TEST_RESOURCE_ID);
+    }
+    assertThat(mockStorage.getRequests().size()).isEqualTo(4);
+  }
+
+  @Test
+  public void createEmptyObject_rapidStorage_doesNotIgnoreExceptions() throws Exception {
+    Bucket mockBucket = mockBucket("RAPID");
+    mockStorage.addResponse(mockBucket);
+    // Non-Ignorable exception.
+    mockStorage.addException(new StatusRuntimeException(Status.UNAVAILABLE));
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      StorageOptions originalOptions = fakeServer.getGrpcStorageOptions();
+
+      RetrySettings customRetrySettings =
+          originalOptions.getRetrySettings().toBuilder()
+              .setMaxAttempts(1) // No retries
+              .build();
+
+      StorageOptions customStorageOptions =
+          originalOptions.toBuilder().setRetrySettings(customRetrySettings).build();
+
+      Storage customStorage = customStorageOptions.getService();
+
+      GoogleCloudStorage gcs = mockedGcsClientImpl(transport, customStorage);
+
+      IOException thrown =
+          assertThrows(IOException.class, () -> gcs.createEmptyObject(TEST_RESOURCE_ID));
+      assertThat(thrown).hasMessageThat().contains(Status.UNAVAILABLE.getCode().toString());
+    }
+  }
+
+  @Test
+  public void createEmptyObject_rapidStorage_alreadyExists_throwsException() throws Exception {
+    Bucket mockBucket = mockBucket("RAPID");
+    mockStorage.addResponse(mockBucket);
+    mockStorage.addException(new StatusRuntimeException(Status.FAILED_PRECONDITION));
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      GoogleCloudStorage gcs =
+          mockedGcsClientImpl(transport, fakeServer.getGrpcStorageOptions().getService());
+
+      IOException thrown =
+          assertThrows(
+              FileAlreadyExistsException.class, () -> gcs.createEmptyObject(TEST_RESOURCE_ID));
+      assertThat(thrown)
+          .hasMessageThat()
+          .isEqualTo(
+              String.format(
+                  "Object gs://%s/%s already exists.", TEST_BUCKET_NAME, TEST_OBJECT_NAME));
     }
   }
 
@@ -1086,5 +1341,71 @@ public class GoogleCloudStorageClientTest {
       assertEquals(results.size(), 1);
       assertThat(results.get(0).exists()).isFalse();
     }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void getUpdatedHeaders_includesFeatureUsageAndUserAgent() throws Exception {
+    GoogleCloudStorageFileSystemOptions gcsfsOptions =
+        GoogleCloudStorageFileSystemOptions.DEFAULT.toBuilder()
+            .setPerformanceCacheEnabled(true)
+            .build();
+    FeatureHeaderGenerator featureHeaderGenerator = new FeatureHeaderGenerator(gcsfsOptions);
+
+    // Prepare storage options
+    GoogleCloudStorageOptions storageOptions =
+        GoogleCloudStorageOptions.DEFAULT.toBuilder()
+            .setAppName("test-app")
+            .setHttpRequestHeaders(ImmutableMap.of())
+            .build();
+    // Use reflection to invoke the private static method under test.
+    Method getUpdatedHeadersMethod =
+        GoogleCloudStorageClientImpl.class.getDeclaredMethod(
+            "getUpdatedHeaders", GoogleCloudStorageOptions.class, FeatureHeaderGenerator.class);
+    getUpdatedHeadersMethod.setAccessible(true);
+    ImmutableMap<String, String> headers =
+        (ImmutableMap<String, String>)
+            getUpdatedHeadersMethod.invoke(null, storageOptions, featureHeaderGenerator);
+
+    String expectedHeaderValue = featureHeaderGenerator.getValue();
+    // Verify all expected headers are present.
+    assertThat(headers.get("user-agent")).contains("test-app");
+    assertThat(headers).containsEntry(FeatureHeaderGenerator.HEADER_NAME, expectedHeaderValue);
+  }
+
+  private Bucket mockBucket(String storageClass) {
+    return Bucket.newBuilder()
+        .setName("projects/_/buckets/foo-bucket")
+        .setStorageClass(storageClass)
+        .build();
+  }
+
+  @Test
+  public void open_fastFailDisabled_doesNotInvokeGet() throws Exception {
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      GoogleCloudStorage gcs =
+          mockedGcsClientImpl(transport, fakeServer.getGrpcStorageOptions().getService());
+
+      GoogleCloudStorageReadOptions readOptions =
+          GoogleCloudStorageReadOptions.builder().setFastFailOnNotFoundEnabled(false).build();
+
+      gcs.open(TEST_RESOURCE_ID, readOptions);
+    }
+    assertEquals(0, mockStorage.getRequests().size());
+  }
+
+  @Test
+  public void open_fastFailEnabled_invokesGet() throws Exception {
+    mockStorage.addResponse(TEST_OBJECT);
+    try (FakeServer fakeServer = FakeServer.of(mockStorage)) {
+      GoogleCloudStorage gcs =
+          mockedGcsClientImpl(transport, fakeServer.getGrpcStorageOptions().getService());
+
+      GoogleCloudStorageReadOptions readOptions =
+          GoogleCloudStorageReadOptions.builder().setFastFailOnNotFoundEnabled(true).build();
+
+      gcs.open(TEST_RESOURCE_ID, readOptions);
+    }
+    assertEquals(1, mockStorage.getRequests().size());
   }
 }
