@@ -57,6 +57,7 @@ public class GoogleHadoopFileSystemConfigurationTest {
       new HashMap<>() {
         {
           put("fs.gs.analytics.core.enable", false);
+          put("fs.gs.analytics.core.metadata.enable", false);
           put("fs.gs.analytics.core.write.enable", false);
           put("fs.gs.application.name.suffix", "");
           put("fs.gs.batch.threads", 15);
@@ -88,6 +89,7 @@ public class GoogleHadoopFileSystemConfigurationTest {
           put("fs.gs.grpc.write.enable", false);
           put("fs.gs.hierarchical.namespace.folders.enable", true);
           put("fs.gs.hierarchical.namespace.folders.optimization.enable", false);
+          put("fs.gs.hierarchical.namespace.recursive.delete.enable", false);
           put("fs.gs.grpc.write.timeout", 600_000L);
           put("fs.gs.http.connect-timeout", 5_000L);
           put("fs.gs.http.max.retry", 10);
@@ -459,6 +461,22 @@ public class GoogleHadoopFileSystemConfigurationTest {
         GoogleHadoopFileSystemConfiguration.getGcsFsOptionsBuilder(config).build();
 
     assertThat(options.isAnalyticsCoreEnabled()).isTrue();
+  }
+
+  @Test
+  public void analyticsCoreMetadataAndHnsRecursiveDeleteProperties() {
+    Configuration config = new Configuration();
+    config.setBoolean("fs.gs.analytics.core.metadata.enable", true);
+    config.setBoolean("fs.gs.hierarchical.namespace.recursive.delete.enable", true);
+
+    assertThat(
+            GoogleHadoopFileSystemConfiguration.GCS_ANALYTICS_CORE_METADATA_ENABLE.get(
+                config, config::getBoolean))
+        .isTrue();
+    assertThat(
+            GoogleHadoopFileSystemConfiguration.GCS_HIERARCHICAL_NAMESPACE_RECURSIVE_DELETE_ENABLE
+                .get(config, config::getBoolean))
+        .isTrue();
   }
 
   @Test

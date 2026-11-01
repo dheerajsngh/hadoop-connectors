@@ -82,6 +82,18 @@ final class AnalyticsCoreConfigMapper {
   static final String PROXY_ADDRESS_KEY = "analytics-core.auth.proxy.address";
   static final String PROXY_USERNAME_KEY = "analytics-core.auth.proxy.username";
   static final String PROXY_PASSWORD_KEY = "analytics-core.auth.proxy.password";
+  static final String HNS_ENABLED_KEY = "analytics-core.hierarchical.namespace.enable";
+  static final String HNS_RECURSIVE_DELETE_ENABLED_KEY =
+      "analytics-core.hierarchical.namespace.recursive.delete.enable";
+  static final String METADATA_LOOKUP_PARALLEL_ENABLED_KEY =
+      "analytics-core.metadata.lookup.parallel.enable";
+  static final String CREATE_ITEMS_CONFLICT_CHECK_ENABLE_KEY =
+      "analytics-core.create.items.conflict.check.enable";
+  static final String IMPLICIT_DIR_REPAIR_ENABLE_KEY =
+      "analytics-core.implicit.directories.auto.repair.enable";
+  static final String MARKER_FILE_PATTERN_KEY = "analytics-core.directory.marker.file.pattern";
+  static final String BUCKET_DELETE_ENABLE_KEY = "analytics-core.bucket.delete.enable";
+  static final String MAX_LIST_ITEMS_PER_CALL_KEY = "analytics-core.list.max.items.per.call";
 
   private static final String WORKLOAD_IDENTITY_FEDERATION_VALUE = "WORKLOAD_IDENTITY_FEDERATION";
 
@@ -205,6 +217,31 @@ final class AnalyticsCoreConfigMapper {
               CHECKSUM_VALIDATION_ENABLED_KEY)
           .put(
               GoogleHadoopFileSystemConfiguration.GCS_UNIVERSE_DOMAIN.getKey(), UNIVERSE_DOMAIN_KEY)
+          .put(
+              GoogleHadoopFileSystemConfiguration.GCS_HIERARCHICAL_NAMESPACE_ENABLE.getKey(),
+              HNS_ENABLED_KEY)
+          .put(
+              GoogleHadoopFileSystemConfiguration.GCS_HIERARCHICAL_NAMESPACE_RECURSIVE_DELETE_ENABLE
+                  .getKey(),
+              HNS_RECURSIVE_DELETE_ENABLED_KEY)
+          .put(
+              GoogleHadoopFileSystemConfiguration.GCS_STATUS_PARALLEL_ENABLE.getKey(),
+              METADATA_LOOKUP_PARALLEL_ENABLED_KEY)
+          .put(
+              GoogleHadoopFileSystemConfiguration.GCS_CREATE_ITEMS_CONFLICT_CHECK_ENABLE.getKey(),
+              CREATE_ITEMS_CONFLICT_CHECK_ENABLE_KEY)
+          .put(
+              GoogleHadoopFileSystemConfiguration.GCS_REPAIR_IMPLICIT_DIRECTORIES_ENABLE.getKey(),
+              IMPLICIT_DIR_REPAIR_ENABLE_KEY)
+          .put(
+              GoogleHadoopFileSystemConfiguration.GCS_MARKER_FILE_PATTERN.getKey(),
+              MARKER_FILE_PATTERN_KEY)
+          .put(
+              GoogleHadoopFileSystemConfiguration.GCE_BUCKET_DELETE_ENABLE.getKey(),
+              BUCKET_DELETE_ENABLE_KEY)
+          .put(
+              GoogleHadoopFileSystemConfiguration.GCS_MAX_LIST_ITEMS_PER_CALL.getKey(),
+              MAX_LIST_ITEMS_PER_CALL_KEY)
           .build();
 
   private AnalyticsCoreConfigMapper() {

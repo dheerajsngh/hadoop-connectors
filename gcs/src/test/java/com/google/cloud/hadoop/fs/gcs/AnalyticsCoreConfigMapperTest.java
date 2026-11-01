@@ -97,6 +97,23 @@ public class AnalyticsCoreConfigMapperTest {
         .isEqualTo("my-csek-key");
     assertThat(mapped.get("fs.gs." + AnalyticsCoreConfigMapper.CHECKSUM_VALIDATION_ENABLED_KEY))
         .isEqualTo("true");
+    assertThat(mapped.get("fs.gs." + AnalyticsCoreConfigMapper.HNS_ENABLED_KEY)).isEqualTo("false");
+    assertThat(mapped.get("fs.gs." + AnalyticsCoreConfigMapper.HNS_RECURSIVE_DELETE_ENABLED_KEY))
+        .isEqualTo("true");
+    assertThat(
+            mapped.get("fs.gs." + AnalyticsCoreConfigMapper.METADATA_LOOKUP_PARALLEL_ENABLED_KEY))
+        .isEqualTo("false");
+    assertThat(
+            mapped.get("fs.gs." + AnalyticsCoreConfigMapper.CREATE_ITEMS_CONFLICT_CHECK_ENABLE_KEY))
+        .isEqualTo("false");
+    assertThat(mapped.get("fs.gs." + AnalyticsCoreConfigMapper.IMPLICIT_DIR_REPAIR_ENABLE_KEY))
+        .isEqualTo("false");
+    assertThat(mapped.get("fs.gs." + AnalyticsCoreConfigMapper.MARKER_FILE_PATTERN_KEY))
+        .isEqualTo("_SUCCESS");
+    assertThat(mapped.get("fs.gs." + AnalyticsCoreConfigMapper.BUCKET_DELETE_ENABLE_KEY))
+        .isEqualTo("true");
+    assertThat(mapped.get("fs.gs." + AnalyticsCoreConfigMapper.MAX_LIST_ITEMS_PER_CALL_KEY))
+        .isEqualTo("1234");
     assertThat(mapped.get("fs.gs." + AnalyticsCoreConfigMapper.USER_AGENT_KEY))
         .isEqualTo(GoogleHadoopFileSystem.GHFS_ID);
     // createTestConfiguration() selects STORAGE_CLIENT without bidi.
@@ -179,6 +196,42 @@ public class AnalyticsCoreConfigMapperTest {
                 GoogleHadoopFileSystemConfiguration.GCS_WRITE_ROLLING_CHECKSUM_ENABLE.getKey()))
         .isFalse();
     assertThat(mapped.containsKey(GoogleHadoopFileSystemConfiguration.GCS_CLIENT_TYPE.getKey()))
+        .isFalse();
+    assertThat(
+            mapped.containsKey(
+                GoogleHadoopFileSystemConfiguration.GCS_HIERARCHICAL_NAMESPACE_ENABLE.getKey()))
+        .isFalse();
+    assertThat(
+            mapped.containsKey(
+                GoogleHadoopFileSystemConfiguration
+                    .GCS_HIERARCHICAL_NAMESPACE_RECURSIVE_DELETE_ENABLE
+                    .getKey()))
+        .isFalse();
+    assertThat(
+            mapped.containsKey(
+                GoogleHadoopFileSystemConfiguration.GCS_STATUS_PARALLEL_ENABLE.getKey()))
+        .isFalse();
+    assertThat(
+            mapped.containsKey(
+                GoogleHadoopFileSystemConfiguration.GCS_CREATE_ITEMS_CONFLICT_CHECK_ENABLE
+                    .getKey()))
+        .isFalse();
+    assertThat(
+            mapped.containsKey(
+                GoogleHadoopFileSystemConfiguration.GCS_REPAIR_IMPLICIT_DIRECTORIES_ENABLE
+                    .getKey()))
+        .isFalse();
+    assertThat(
+            mapped.containsKey(
+                GoogleHadoopFileSystemConfiguration.GCS_MARKER_FILE_PATTERN.getKey()))
+        .isFalse();
+    assertThat(
+            mapped.containsKey(
+                GoogleHadoopFileSystemConfiguration.GCE_BUCKET_DELETE_ENABLE.getKey()))
+        .isFalse();
+    assertThat(
+            mapped.containsKey(
+                GoogleHadoopFileSystemConfiguration.GCS_MAX_LIST_ITEMS_PER_CALL.getKey()))
         .isFalse();
   }
 
@@ -529,8 +582,24 @@ public class AnalyticsCoreConfigMapperTest {
     Configuration config = new Configuration();
     config.set("fs.gs.auth.type", "UNAUTHENTICATED");
     config.set("fs.gs.proxy.address", "connector-proxy:3128");
+    config.setBoolean("fs.gs.hierarchical.namespace.folders.enable", false);
+    config.setBoolean("fs.gs.hierarchical.namespace.recursive.delete.enable", true);
+    config.setBoolean("fs.gs.status.parallel.enable", false);
+    config.setBoolean("fs.gs.create.items.conflict.check.enable", false);
+    config.setBoolean("fs.gs.implicit.dir.repair.enable", false);
+    config.set("fs.gs.marker.file.pattern", "_SUCCESS");
+    config.setBoolean("fs.gs.bucket.delete.enable", true);
+    config.setInt("fs.gs.list.max.items.per.call", 250);
     config.set("fs.gs." + AnalyticsCoreConfigMapper.AUTH_TYPE_KEY, "SERVICE_ACCOUNT_JSON_KEYFILE");
     config.set("fs.gs." + AnalyticsCoreConfigMapper.PROXY_ADDRESS_KEY, "analytics-core-proxy:9090");
+    config.set("fs.gs." + AnalyticsCoreConfigMapper.HNS_ENABLED_KEY, "true");
+    config.set("fs.gs." + AnalyticsCoreConfigMapper.HNS_RECURSIVE_DELETE_ENABLED_KEY, "false");
+    config.set("fs.gs." + AnalyticsCoreConfigMapper.METADATA_LOOKUP_PARALLEL_ENABLED_KEY, "true");
+    config.set("fs.gs." + AnalyticsCoreConfigMapper.CREATE_ITEMS_CONFLICT_CHECK_ENABLE_KEY, "true");
+    config.set("fs.gs." + AnalyticsCoreConfigMapper.IMPLICIT_DIR_REPAIR_ENABLE_KEY, "true");
+    config.set("fs.gs." + AnalyticsCoreConfigMapper.MARKER_FILE_PATTERN_KEY, "_OTHER");
+    config.set("fs.gs." + AnalyticsCoreConfigMapper.BUCKET_DELETE_ENABLE_KEY, "false");
+    config.set("fs.gs." + AnalyticsCoreConfigMapper.MAX_LIST_ITEMS_PER_CALL_KEY, "9999");
 
     Map<String, String> mapped = AnalyticsCoreConfigMapper.mapConfigs(config, "fs.gs.");
 
@@ -539,7 +608,23 @@ public class AnalyticsCoreConfigMapperTest {
             "fs.gs." + AnalyticsCoreConfigMapper.AUTH_TYPE_KEY,
             "UNAUTHENTICATED",
             "fs.gs." + AnalyticsCoreConfigMapper.PROXY_ADDRESS_KEY,
-            "connector-proxy:3128");
+            "connector-proxy:3128",
+            "fs.gs.analytics-core.hierarchical.namespace.enable",
+            "false",
+            "fs.gs.analytics-core.hierarchical.namespace.recursive.delete.enable",
+            "true",
+            "fs.gs.analytics-core.metadata.lookup.parallel.enable",
+            "false",
+            "fs.gs.analytics-core.create.items.conflict.check.enable",
+            "false",
+            "fs.gs.analytics-core.implicit.directories.auto.repair.enable",
+            "false",
+            "fs.gs.analytics-core.directory.marker.file.pattern",
+            "_SUCCESS",
+            "fs.gs.analytics-core.bucket.delete.enable",
+            "true",
+            "fs.gs.analytics-core.list.max.items.per.call",
+            "250");
   }
 
   @Test
@@ -635,6 +720,21 @@ public class AnalyticsCoreConfigMapperTest {
     config.set(GoogleHadoopFileSystemConfiguration.GCS_ENCRYPTION_KEY.getKey(), "my-csek-key");
     config.set(
         GoogleHadoopFileSystemConfiguration.GCS_WRITE_ROLLING_CHECKSUM_ENABLE.getKey(), "true");
+    config.setBoolean(
+        GoogleHadoopFileSystemConfiguration.GCS_HIERARCHICAL_NAMESPACE_ENABLE.getKey(), false);
+    config.setBoolean(
+        GoogleHadoopFileSystemConfiguration.GCS_HIERARCHICAL_NAMESPACE_RECURSIVE_DELETE_ENABLE
+            .getKey(),
+        true);
+    config.setBoolean(
+        GoogleHadoopFileSystemConfiguration.GCS_STATUS_PARALLEL_ENABLE.getKey(), false);
+    config.setBoolean(
+        GoogleHadoopFileSystemConfiguration.GCS_CREATE_ITEMS_CONFLICT_CHECK_ENABLE.getKey(), false);
+    config.setBoolean(
+        GoogleHadoopFileSystemConfiguration.GCS_REPAIR_IMPLICIT_DIRECTORIES_ENABLE.getKey(), false);
+    config.set(GoogleHadoopFileSystemConfiguration.GCS_MARKER_FILE_PATTERN.getKey(), "_SUCCESS");
+    config.setBoolean(GoogleHadoopFileSystemConfiguration.GCE_BUCKET_DELETE_ENABLE.getKey(), true);
+    config.setInt(GoogleHadoopFileSystemConfiguration.GCS_MAX_LIST_ITEMS_PER_CALL.getKey(), 1234);
     config.set("fs.gs.client.type", "STORAGE_CLIENT");
     return config;
   }
@@ -1089,5 +1189,106 @@ public class AnalyticsCoreConfigMapperTest {
     config.setBoolean(
         GoogleHadoopFileSystemConfiguration.GCS_OPERATION_BIDI_API_ENABLE.getKey(), true);
     assertThat(AnalyticsCoreConfigMapper.toProtocol(config)).isEqualTo(Protocol.BIDI);
+  }
+
+  @Test
+  public void mapConfigs_mapsEachMetadataKeyToExpectedAnalyticsCoreKeyAndRemovesSource() {
+    Configuration config = new Configuration();
+    config.setBoolean("fs.gs.hierarchical.namespace.folders.enable", false);
+    config.setBoolean("fs.gs.hierarchical.namespace.recursive.delete.enable", true);
+    config.setBoolean("fs.gs.status.parallel.enable", false);
+    config.setBoolean("fs.gs.create.items.conflict.check.enable", false);
+    config.setBoolean("fs.gs.implicit.dir.repair.enable", false);
+    config.set("fs.gs.marker.file.pattern", "_SUCCESS");
+    config.setBoolean("fs.gs.bucket.delete.enable", true);
+    config.setInt("fs.gs.list.max.items.per.call", 2500);
+
+    Map<String, String> mapped = AnalyticsCoreConfigMapper.mapConfigs(config, "fs.gs.");
+
+    assertThat(mapped)
+        .containsAtLeast(
+            "fs.gs.analytics-core.hierarchical.namespace.enable",
+            "false",
+            "fs.gs.analytics-core.hierarchical.namespace.recursive.delete.enable",
+            "true",
+            "fs.gs.analytics-core.metadata.lookup.parallel.enable",
+            "false",
+            "fs.gs.analytics-core.create.items.conflict.check.enable",
+            "false",
+            "fs.gs.analytics-core.implicit.directories.auto.repair.enable",
+            "false",
+            "fs.gs.analytics-core.directory.marker.file.pattern",
+            "_SUCCESS",
+            "fs.gs.analytics-core.bucket.delete.enable",
+            "true",
+            "fs.gs.analytics-core.list.max.items.per.call",
+            "2500");
+    assertThat(mapped.keySet())
+        .containsNoneOf(
+            "fs.gs.hierarchical.namespace.folders.enable",
+            "fs.gs.hierarchical.namespace.recursive.delete.enable",
+            "fs.gs.status.parallel.enable",
+            "fs.gs.create.items.conflict.check.enable",
+            "fs.gs.implicit.dir.repair.enable",
+            "fs.gs.marker.file.pattern",
+            "fs.gs.bucket.delete.enable",
+            "fs.gs.list.max.items.per.call");
+  }
+
+  @Test
+  public void mapConfigs_metadataKeysUnset_omitsAnalyticsCoreMetadataKeys() {
+    Configuration config = new Configuration();
+
+    Map<String, String> mapped = AnalyticsCoreConfigMapper.mapConfigs(config, "fs.gs.");
+
+    assertThat(mapped.keySet())
+        .containsNoneOf(
+            "fs.gs.analytics-core.hierarchical.namespace.enable",
+            "fs.gs.analytics-core.hierarchical.namespace.recursive.delete.enable",
+            "fs.gs.analytics-core.metadata.lookup.parallel.enable",
+            "fs.gs.analytics-core.create.items.conflict.check.enable",
+            "fs.gs.analytics-core.implicit.directories.auto.repair.enable",
+            "fs.gs.analytics-core.directory.marker.file.pattern",
+            "fs.gs.analytics-core.bucket.delete.enable",
+            "fs.gs.analytics-core.list.max.items.per.call");
+  }
+
+  @Test
+  public void mapConfigs_batchThreads_passesThroughAsBatchThreads() {
+    Configuration config = new Configuration();
+    config.setInt(GoogleHadoopFileSystemConfiguration.GCS_BATCH_THREADS.getKey(), 32);
+
+    Map<String, String> mapped = AnalyticsCoreConfigMapper.mapConfigs(config, "fs.gs.");
+
+    assertThat(mapped).containsEntry("fs.gs.batch.threads", "32");
+    assertThat(mapped).doesNotContainKey("fs.gs.analytics-core.batch.threads");
+  }
+
+  @Test
+  public void mapConfigs_operationMoveEnable_isNotMappedToAnalyticsCoreRenameMoveKey() {
+    Configuration config = new Configuration();
+    config.setBoolean(
+        GoogleHadoopFileSystemConfiguration.GCS_OPERATION_MOVE_ENABLE.getKey(), false);
+
+    Map<String, String> mapped = AnalyticsCoreConfigMapper.mapConfigs(config, "fs.gs.");
+
+    assertThat(mapped).doesNotContainKey("fs.gs.analytics-core.rename.move.enable");
+    assertThat(mapped).doesNotContainKey("fs.gs.analytics-core.operation.move.enable");
+  }
+
+  @Test
+  public void mapConfigs_metadataMapping_isParsedByAnalyticsCore() {
+    Configuration config = new Configuration();
+    config.setBoolean(
+        GoogleHadoopFileSystemConfiguration.GCS_HIERARCHICAL_NAMESPACE_ENABLE.getKey(), false);
+    config.setBoolean(
+        GoogleHadoopFileSystemConfiguration.GCS_STATUS_PARALLEL_ENABLE.getKey(), false);
+
+    GcsFileSystemOptions options =
+        GcsFileSystemOptions.createFromOptions(
+            AnalyticsCoreConfigMapper.mapConfigs(config, "fs.gs."), "fs.gs.");
+
+    assertThat(options.isHnsApiEnabled()).isFalse();
+    assertThat(options.isMetadataLookupParallelEnabled()).isFalse();
   }
 }

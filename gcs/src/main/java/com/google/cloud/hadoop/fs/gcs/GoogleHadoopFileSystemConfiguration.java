@@ -633,6 +633,15 @@ public class GoogleHadoopFileSystemConfiguration {
           "fs.gs.hierarchical.namespace.folders.optimization.enable",
           GoogleCloudStorageOptions.DEFAULT.isHnOptimizationEnabled());
 
+  /**
+   * Configuration key for enabling server-side recursive folder deletion on Hierarchical Namespace
+   * (HNS) buckets via the Storage Control DeleteFolderRecursive long-running operation (LRO).
+   */
+  public static final HadoopConfigurationProperty<Boolean>
+      GCS_HIERARCHICAL_NAMESPACE_RECURSIVE_DELETE_ENABLE =
+          new HadoopConfigurationProperty<>(
+              "fs.gs.hierarchical.namespace.recursive.delete.enable", false);
+
   /** Configuration key for enabling move operation in gcs instead of copy+delete. */
   public static final HadoopConfigurationProperty<Boolean> GCS_OPERATION_MOVE_ENABLE =
       new HadoopConfigurationProperty<>(
@@ -672,6 +681,15 @@ public class GoogleHadoopFileSystemConfiguration {
   /** Configuration key for enabling GCS Analytics Core write path. */
   public static final HadoopConfigurationProperty<Boolean> GCS_ANALYTICS_CORE_WRITE_ENABLE =
       new HadoopConfigurationProperty<>("fs.gs.analytics.core.write.enable", false);
+
+  /**
+   * Configuration key for enabling GCS Analytics Core metadata path.
+   *
+   * <p>When enabled, metadata operations (such as file status lookups, directory listings,
+   * directory creation, deletion, and rename) are routed through {@code gcs-analytics-core}.
+   */
+  public static final HadoopConfigurationProperty<Boolean> GCS_ANALYTICS_CORE_METADATA_ENABLE =
+      new HadoopConfigurationProperty<>("fs.gs.analytics.core.metadata.enable", false);
   /**
    * Configuration key to delete intermediate temporary source objects during compose operations in
    * Hadoop stream writes (e.g. workflows calling {@code hsync()}), bypassing soft-delete retention.
