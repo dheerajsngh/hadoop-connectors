@@ -16,6 +16,8 @@
 
 package com.google.cloud.hadoop.fs.gcs;
 
+import static com.google.cloud.hadoop.fs.gcs.GhfsStatistic.FILES_DELETED;
+import static com.google.cloud.hadoop.fs.gcs.GhfsStatistic.FILES_DELETE_REJECTED;
 import static com.google.cloud.hadoop.fs.gcs.GhfsStatistic.STREAM_READ_OPERATIONS;
 import static com.google.cloud.hadoop.fs.gcs.GhfsStatistic.STREAM_WRITE_OPERATIONS;
 import static com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystemConfiguration.BLOCK_SIZE;
@@ -31,10 +33,36 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import com.google.api.client.googleapis.json.GoogleJsonError;
+import com.google.api.client.googleapis.json.GoogleJsonError.ErrorInfo;
+import com.google.api.client.googleapis.json.GoogleJsonResponseException;
+import com.google.api.client.http.HttpHeaders;
+import com.google.api.client.http.HttpResponseException;
+import com.google.api.client.http.LowLevelHttpRequest;
+import com.google.api.client.http.LowLevelHttpResponse;
+import com.google.api.client.testing.http.MockHttpTransport;
+import com.google.api.client.testing.http.MockLowLevelHttpRequest;
+import com.google.api.client.testing.http.MockLowLevelHttpResponse;
+import com.google.api.core.ApiFutures;
+import com.google.api.gax.rpc.ApiException;
+import com.google.api.gax.rpc.ApiExceptions;
+import com.google.api.gax.rpc.StatusCode;
+import com.google.auth.Retryable;
+import com.google.auth.ServiceAccountSigner;
+import com.google.auth.mtls.CertificateSourceUnavailableException;
+import com.google.auth.oauth2.AccessToken;
+import com.google.auth.oauth2.ComputeEngineCredentials;
 import com.google.auth.oauth2.GoogleCredentials;
+import com.google.auth.oauth2.IdentityPoolCredentialSource;
+import com.google.auth.oauth2.IdentityPoolCredentials;
+import com.google.auth.oauth2.ImpersonatedCredentials;
+import com.google.auth.oauth2.StsRequestHandler;
+import com.google.auth.oauth2.StsTokenExchangeRequest;
 import com.google.cloud.gcs.analyticscore.client.GcsClientOptions;
 import com.google.cloud.gcs.analyticscore.client.GcsClientOptions.Protocol;
+import com.google.cloud.hadoop.fs.gcs.auth.DelegationTokenIOException;
 import com.google.cloud.hadoop.gcsio.FileInfo;
+import com.google.cloud.hadoop.gcsio.GoogleCloudStorageExceptions;
 import com.google.cloud.hadoop.gcsio.GoogleCloudStorageFileSystem;
 import com.google.cloud.hadoop.gcsio.GoogleCloudStorageFileSystemImpl;
 import com.google.cloud.hadoop.gcsio.GoogleCloudStorageFileSystemOptions;
@@ -46,22 +74,38 @@ import com.google.cloud.hadoop.gcsio.MethodOutcome;
 import com.google.cloud.hadoop.gcsio.StorageResourceId;
 import com.google.cloud.hadoop.gcsio.testing.InMemoryGoogleCloudStorage;
 import com.google.cloud.hadoop.util.AccessTokenProvider;
+import com.google.cloud.hadoop.util.ApiErrorExtractor;
 import com.google.cloud.hadoop.util.HadoopCredentialsConfiguration.AuthenticationType;
 import com.google.cloud.hadoop.util.InvocationIdContext;
 import com.google.cloud.hadoop.util.LoggingFormatter;
 import com.google.cloud.hadoop.util.interceptors.LoggingInterceptor;
 import com.google.cloud.hadoop.util.testing.TestingAccessTokenProvider;
+import com.google.cloud.storage.StorageException;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousCloseException;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SeekableByteChannel;
+import java.nio.file.DirectoryNotEmptyException;
+import java.security.GeneralSecurityException;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Formatter;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -1034,5 +1078,588 @@ public class GoogleHadoopFileSystemTest extends GoogleHadoopFileSystemIntegratio
     public Configuration getConf() {
       return config;
     }
+  }
+
+  @Test
+  public void renameAndDelete_bareSocketTimeoutException_rethrows() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    try (GoogleHadoopFileSystem fs =
+        createGhfsThrowingOnRenameAndDelete(new SocketTimeoutException("Read timed out"))) {
+      assertThrows(SocketTimeoutException.class, () -> fs.rename(src, dst));
+    }
+
+    try (GoogleHadoopFileSystem fs =
+        createGhfsThrowingOnRenameAndDelete(new SocketTimeoutException("Read timed out"))) {
+      assertThrows(SocketTimeoutException.class, () -> fs.delete(src, /* recursive= */ false));
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+          .isEqualTo(1L);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+    }
+  }
+
+  @Test
+  public void renameAndDelete_nonSocketTransportAndTimeoutFailures_rethrow() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    ImmutableList<IOException> transportAndTimeoutFailures =
+        ImmutableList.of(
+            new EOFException("Unexpected end of stream"),
+            new UnknownHostException("storage.googleapis.com"),
+            new ClosedChannelException(),
+            new AsynchronousCloseException(),
+            new IOException("LRO timed out", new TimeoutException("Operation timed out")),
+            new IOException(
+                "Premature close",
+                StorageException.translate(new IOException("Connection closed prematurely"))));
+
+    for (IOException failure : transportAndTimeoutFailures) {
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException renameThrown = assertThrows(IOException.class, () -> fs.rename(src, dst));
+        assertThat(renameThrown).isSameInstanceAs(failure);
+      }
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException deleteThrown =
+            assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ false));
+        assertThat(deleteThrown).isSameInstanceAs(failure);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+            .isEqualTo(1L);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      }
+    }
+  }
+
+  @Test
+  public void renameAndDelete_http408And429QuotaOrPlain_rethrow() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    GoogleJsonError quotaError = new GoogleJsonError();
+    quotaError.setCode(429);
+    quotaError.setMessage("Quota exceeded");
+    ErrorInfo errorInfo = new ErrorInfo();
+    errorInfo.setDomain(ApiErrorExtractor.USAGE_LIMITS_DOMAIN);
+    errorInfo.setReason(ApiErrorExtractor.QUOTA_EXCEEDED_REASON);
+    quotaError.setErrors(Collections.singletonList(errorInfo));
+    GoogleJsonResponseException quota429 =
+        GoogleCloudStorageExceptions.createJsonResponseException(quotaError, new HttpHeaders());
+
+    ImmutableList<IOException> httpFailures =
+        ImmutableList.of(
+            new HttpResponseException.Builder(408, "Request Timeout", new HttpHeaders()).build(),
+            new HttpResponseException.Builder(429, "Too Many Requests", new HttpHeaders()).build(),
+            quota429);
+
+    for (IOException failure : httpFailures) {
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException renameThrown = assertThrows(IOException.class, () -> fs.rename(src, dst));
+        assertThat(renameThrown).isSameInstanceAs(failure);
+      }
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException deleteThrown =
+            assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ false));
+        assertThat(deleteThrown).isSameInstanceAs(failure);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+            .isEqualTo(1L);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      }
+    }
+  }
+
+  @Test
+  public void renameAndDelete_afterClose_throwsIOException() throws Exception {
+    GoogleHadoopFileSystem fs = createInMemoryGoogleHadoopFileSystem();
+    Path src = new Path(fs.getWorkingDirectory(), "src");
+    Path dst = new Path(fs.getWorkingDirectory(), "dst");
+    Path root = new Path(fs.getUri());
+    fs.close();
+
+    IOException renameThrown = assertThrows(IOException.class, () -> fs.rename(src, dst));
+    assertThat(renameThrown)
+        .hasMessageThat()
+        .isEqualTo("GoogleHadoopFileSystem has been closed or not initialized.");
+
+    IOException renameRootThrown = assertThrows(IOException.class, () -> fs.rename(root, dst));
+    assertThat(renameRootThrown)
+        .hasMessageThat()
+        .isEqualTo("GoogleHadoopFileSystem has been closed or not initialized.");
+
+    IOException deleteThrown =
+        assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ false));
+    assertThat(deleteThrown)
+        .hasMessageThat()
+        .isEqualTo("GoogleHadoopFileSystem has been closed or not initialized.");
+
+    GoogleHadoopFileSystem uninitializedFs = new GoogleHadoopFileSystem();
+    IOException uninitializedRenameThrown =
+        assertThrows(IOException.class, () -> uninitializedFs.rename(src, dst));
+    assertThat(uninitializedRenameThrown)
+        .hasMessageThat()
+        .isEqualTo("GoogleHadoopFileSystem has been closed or not initialized.");
+    IOException uninitializedDeleteThrown =
+        assertThrows(IOException.class, () -> uninitializedFs.delete(src, /* recursive= */ false));
+    assertThat(uninitializedDeleteThrown)
+        .hasMessageThat()
+        .isEqualTo("GoogleHadoopFileSystem has been closed or not initialized.");
+  }
+
+  @Test
+  public void renameAndDelete_storageExceptionCodes_rethrowOrReturnFalse() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    for (int failureCode : new int[] {401, 403, 429, 503}) {
+      IOException failure =
+          new IOException("storage failure", new StorageException(failureCode, "err"));
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException renameThrown = assertThrows(IOException.class, () -> fs.rename(src, dst));
+        assertThat(renameThrown).isSameInstanceAs(failure);
+      }
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException deleteThrown =
+            assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ true));
+        assertThat(deleteThrown).isSameInstanceAs(failure);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+            .isEqualTo(1L);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      }
+    }
+
+    for (int nonFailureCode : new int[] {404, 409, 412}) {
+      IOException nonFailure =
+          new IOException("storage semantic", new StorageException(nonFailureCode, "semantic"));
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(nonFailure)) {
+        assertThat(fs.rename(src, dst)).isFalse();
+        assertThat(fs.delete(src, /* recursive= */ true)).isFalse();
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+            .isEqualTo(0L);
+      }
+    }
+  }
+
+  @Test
+  public void renameAndDelete_apiExceptionCodes_rethrowOrReturnFalse() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    StatusCode.Code[] failureCodes = {
+      StatusCode.Code.PERMISSION_DENIED,
+      StatusCode.Code.UNAVAILABLE,
+      StatusCode.Code.INVALID_ARGUMENT,
+    };
+    for (StatusCode.Code code : failureCodes) {
+      IOException failure = new IOException("gax failure", createApiException(code));
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException renameThrown = assertThrows(IOException.class, () -> fs.rename(src, dst));
+        assertThat(renameThrown).isSameInstanceAs(failure);
+      }
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException deleteThrown =
+            assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ false));
+        assertThat(deleteThrown).isSameInstanceAs(failure);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+            .isEqualTo(1L);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      }
+    }
+
+    StatusCode.Code[] nonFailureCodes = {
+      StatusCode.Code.NOT_FOUND,
+      StatusCode.Code.ALREADY_EXISTS,
+      StatusCode.Code.FAILED_PRECONDITION,
+    };
+    for (StatusCode.Code code : nonFailureCodes) {
+      IOException nonFailure = new IOException("gax semantic", createApiException(code));
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(nonFailure)) {
+        assertThat(fs.rename(src, dst)).isFalse();
+        assertThat(fs.delete(src, /* recursive= */ false)).isFalse();
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+            .isEqualTo(0L);
+      }
+    }
+  }
+
+  @Test
+  public void renameAndDelete_statusRuntimeException_rethrowsOrReturnsFalse() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    IOException grpcFailure =
+        new IOException("grpc unavailable", new StatusRuntimeException(Status.UNAVAILABLE));
+    try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(grpcFailure)) {
+      assertThrows(IOException.class, () -> fs.rename(src, dst));
+      assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ false));
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+          .isEqualTo(1L);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+    }
+
+    IOException grpcNotFound =
+        new IOException("grpc not found", new StatusRuntimeException(Status.NOT_FOUND));
+    try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(grpcNotFound)) {
+      assertThat(fs.rename(src, dst)).isFalse();
+      assertThat(fs.delete(src, /* recursive= */ false)).isFalse();
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+    }
+  }
+
+  @Test
+  public void renameAndDelete_compositeNotFoundAndForbidden_rethrows() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    IOException composite =
+        GoogleCloudStorageExceptions.createCompositeException(
+            ImmutableList.of(
+                new FileNotFoundException("gs://request-failure-test-bucket/missing"),
+                new IOException("Error deleting", new StorageException(403, "Forbidden"))));
+    try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(composite)) {
+      IOException renameThrown = assertThrows(IOException.class, () -> fs.rename(src, dst));
+      assertThat(renameThrown).isSameInstanceAs(composite);
+      IOException deleteThrown =
+          assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ true));
+      assertThat(deleteThrown).isSameInstanceAs(composite);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+          .isEqualTo(1L);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+    }
+
+    FileNotFoundException primaryNotFound =
+        new FileNotFoundException("gs://request-failure-test-bucket/missing");
+    primaryNotFound.addSuppressed(new StorageException(403, "Forbidden"));
+    try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(primaryNotFound)) {
+      assertThrows(FileNotFoundException.class, () -> fs.rename(src, dst));
+      assertThrows(FileNotFoundException.class, () -> fs.delete(src, /* recursive= */ true));
+    }
+  }
+
+  @Test
+  public void renameAndDelete_cyclicCauseAndSuppressedGraph_terminatesCleanly() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    IOException cycle1 = new IOException("cycle-1");
+    IOException cycle2 = new IOException("cycle-2", cycle1);
+    cycle1.initCause(cycle2);
+    cycle1.addSuppressed(cycle2);
+    cycle2.addSuppressed(cycle1);
+
+    try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(cycle1)) {
+      assertThat(fs.rename(src, dst)).isFalse();
+      assertThat(fs.delete(src, /* recursive= */ false)).isFalse();
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+    }
+  }
+
+  @Test
+  public void delete_nonEmptyDirectory_rethrowsDirectoryNotEmptyAndIncrementsRejected()
+      throws Exception {
+    try (GoogleHadoopFileSystem fs = createInMemoryGoogleHadoopFileSystem()) {
+      Path dir = new Path(fs.getWorkingDirectory(), "non-empty-dir");
+      Path child = new Path(dir, "child.txt");
+      fs.mkdirs(dir);
+      try (FSDataOutputStream out = fs.create(child)) {
+        out.write(new byte[] {1, 2, 3});
+      }
+
+      assertThrows(DirectoryNotEmptyException.class, () -> fs.delete(dir, /* recursive= */ false));
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+          .isEqualTo(1L);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+    }
+  }
+
+  @Test
+  public void delete_missingFile_returnsFalseWithoutIncrementingFilesDeleted() throws Exception {
+    try (GoogleHadoopFileSystem fs = createInMemoryGoogleHadoopFileSystem()) {
+      Path missing = new Path(fs.getWorkingDirectory(), "does-not-exist.txt");
+
+      assertThat(fs.delete(missing, /* recursive= */ false)).isFalse();
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+          .isEqualTo(0L);
+
+      Path existing = new Path(fs.getWorkingDirectory(), "exists.txt");
+      try (FSDataOutputStream out = fs.create(existing)) {
+        out.write(new byte[] {42});
+      }
+      assertThat(fs.delete(existing, /* recursive= */ false)).isTrue();
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(1L);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+          .isEqualTo(0L);
+    }
+  }
+
+  @Test
+  public void renameAndDelete_httpPathAuthAndTruncatedStreamFailures_rethrow() throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    MockHttpTransport sts400Transport =
+        new MockHttpTransport() {
+          @Override
+          public LowLevelHttpRequest buildRequest(String method, String url) {
+            return new MockLowLevelHttpRequest(url) {
+              @Override
+              public LowLevelHttpResponse execute() {
+                return new MockLowLevelHttpResponse()
+                    .setStatusCode(400)
+                    .setContentType("application/json; charset=UTF-8")
+                    .setContent(
+                        "{\"error\":\"invalid_grant\",\"error_description\":\"Bad token\"}");
+              }
+            };
+          }
+        };
+    StsRequestHandler stsHandler =
+        StsRequestHandler.newBuilder(
+                "https://sts.googleapis.com/v1/token",
+                StsTokenExchangeRequest.newBuilder(
+                        "bad-token", "urn:ietf:params:oauth:token-type:jwt")
+                    .build(),
+                sts400Transport.createRequestFactory())
+            .build();
+    IOException nonRetryableOAuthEx = assertThrows(IOException.class, stsHandler::exchangeToken);
+    assertThat(((Retryable) nonRetryableOAuthEx).isRetryable()).isFalse();
+
+    ComputeEngineCredentials mds429Credentials =
+        ComputeEngineCredentials.newBuilder()
+            .setHttpTransportFactory(
+                () ->
+                    new MockHttpTransport() {
+                      @Override
+                      public LowLevelHttpRequest buildRequest(String method, String url) {
+                        return new MockLowLevelHttpRequest(url) {
+                          @Override
+                          public LowLevelHttpResponse execute() {
+                            return new MockLowLevelHttpResponse()
+                                .setStatusCode(429)
+                                .setContent("Too Many Requests");
+                          }
+                        };
+                      }
+                    })
+            .build();
+    IOException mds429Ex = assertThrows(IOException.class, mds429Credentials::refreshAccessToken);
+
+    ImmutableList<IOException> failures =
+        ImmutableList.of(
+            nonRetryableOAuthEx,
+            mds429Ex,
+            new IOException(
+                "Error code 404 trying to get security access token from Compute Engine metadata"
+                    + " for the default service account"),
+            new DelegationTokenIOException("token mismatch"),
+            new CertificateSourceUnavailableException("mTLS cert missing"),
+            new IOException(
+                "signing failed",
+                new ServiceAccountSigner.SigningException(
+                    "Failed to sign", new RuntimeException("kms error"))),
+            new IOException(
+                "Error signing service account access token request with private key.",
+                new GeneralSecurityException("Invalid key")),
+            new IOException("Premature EOF"),
+            new IOException("Connection closed prematurely"),
+            new IOException("insufficient data written"),
+            new IOException("Error writing request body to server"));
+
+    for (IOException failure : failures) {
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException renameThrown = assertThrows(IOException.class, () -> fs.rename(src, dst));
+        assertThat(renameThrown).isSameInstanceAs(failure);
+      }
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException deleteThrown =
+            assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ false));
+        assertThat(deleteThrown).isSameInstanceAs(failure);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+            .isEqualTo(1L);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      }
+    }
+
+    FileNotFoundException notFoundWithMdsLikeObjectName =
+        new FileNotFoundException("Error code 404 trying to get obj from Compute Engine metadata");
+    try (GoogleHadoopFileSystem fs =
+        createGhfsThrowingOnRenameAndDelete(notFoundWithMdsLikeObjectName)) {
+      assertThat(fs.rename(src, dst)).isFalse();
+      assertThat(fs.delete(src, /* recursive= */ false)).isFalse();
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+          .isEqualTo(0L);
+    }
+  }
+
+  @Test
+  public void
+      renameAndDelete_workerErrorsFolderStallStorageZeroAndImpersonatedAuthFailures_rethrow()
+          throws Exception {
+    Path src = new Path("gs://request-failure-test-bucket/src");
+    Path dst = new Path("gs://request-failure-test-bucket/dst");
+
+    MockHttpTransport http404Transport =
+        new MockHttpTransport() {
+          @Override
+          public LowLevelHttpRequest buildRequest(String method, String url) {
+            return new MockLowLevelHttpRequest(url) {
+              @Override
+              public LowLevelHttpResponse execute() {
+                return new MockLowLevelHttpResponse()
+                    .setStatusCode(404)
+                    .setContentType("application/json; charset=UTF-8")
+                    .setContent("{\"error\":{\"code\":404,\"message\":\"Not found\"}}");
+              }
+            };
+          }
+        };
+    ImpersonatedCredentials impersonatedCreds =
+        ImpersonatedCredentials.create(
+            GoogleCredentials.create(
+                new AccessToken("src-token", new Date(System.currentTimeMillis() + 3_600_000L))),
+            "missing-sa@test-project.iam.gserviceaccount.com",
+            /* delegates= */ null,
+            ImmutableList.of("https://www.googleapis.com/auth/cloud-platform"),
+            /* lifetime= */ 300,
+            () -> http404Transport);
+    IOException impersonated404Ex =
+        assertThrows(IOException.class, impersonatedCreds::refreshAccessToken);
+
+    IdentityPoolCredentials identityPoolUrl404Creds =
+        IdentityPoolCredentials.newBuilder()
+            .setAudience(
+                "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr")
+            .setSubjectTokenType("urn:ietf:params:oauth:token-type:jwt")
+            .setTokenUrl("https://sts.googleapis.com/v1/token")
+            .setCredentialSource(
+                new IdentityPoolCredentialSource(
+                    ImmutableMap.of("url", "http://169.254.169.254/subject-token")))
+            .setHttpTransportFactory(() -> http404Transport)
+            .build();
+    IOException identityPool404Ex =
+        assertThrows(IOException.class, identityPoolUrl404Creds::refreshAccessToken);
+
+    ImmutableList<IOException> failures =
+        ImmutableList.of(
+            new IOException("Error deleting object", new OutOfMemoryError("Java heap space")),
+            new IOException("Error deleting object", new AssertionError("invariant failed")),
+            new IOException(
+                "Received IllegalStateException while deletion of folder resource : Deletion"
+                    + " stalled: No active threads, but 1 folders remain.",
+                new IllegalStateException(
+                    "Deletion stalled: No active threads, but 1 folders remain.")),
+            new IOException(
+                "Error in shutting down batch executor : Failed to get result:"
+                    + " java.lang.InterruptedException"),
+            new IOException("task rejected", new RejectedExecutionException("pool shut down")),
+            new IOException("client closed", new IllegalStateException("Storage client is closed")),
+            new IOException(
+                "Error creating empty object",
+                new StorageException(
+                    0, "onComplete without preceding onNext, unable to determine success.")),
+            new IOException(
+                "Error finalizing upload",
+                new StorageException(
+                    0, "Finalized upload, but object size less than expected.", "dataLoss", null)),
+            impersonated404Ex,
+            identityPool404Ex);
+
+    for (IOException failure : failures) {
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException renameThrown = assertThrows(IOException.class, () -> fs.rename(src, dst));
+        assertThat(renameThrown).isSameInstanceAs(failure);
+      }
+      try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(failure)) {
+        IOException deleteThrown =
+            assertThrows(IOException.class, () -> fs.delete(src, /* recursive= */ true));
+        assertThat(deleteThrown).isSameInstanceAs(failure);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+            .isEqualTo(1L);
+        assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      }
+    }
+
+    // Concurrent close() racing between rename's outer checkOpen() and renameInternal's checkOpen()
+    URI initUri = URI.create("gs://request-failure-test-bucket/");
+    GoogleCloudStorageFileSystem backingFs =
+        new GoogleCloudStorageFileSystemImpl(
+            InMemoryGoogleCloudStorage::new,
+            GoogleCloudStorageFileSystemOptions.builder()
+                .setCloudStorageOptions(getInMemoryGoogleCloudStorageOptions())
+                .build());
+    GoogleHadoopFileSystem concurrentlyClosingFs =
+        new GoogleHadoopFileSystem(backingFs) {
+          @Override
+          void renameInternal(Path s, Path d) throws IOException {
+            close();
+            super.renameInternal(s, d);
+          }
+        };
+    concurrentlyClosingFs.initialize(initUri, new Configuration());
+    IOException closedDuringRename =
+        assertThrows(IOException.class, () -> concurrentlyClosingFs.rename(src, dst));
+    assertThat(closedDuringRename)
+        .hasMessageThat()
+        .isEqualTo("GoogleHadoopFileSystem has been closed or not initialized.");
+
+    // Negative check: semantic ApiException(NOT_FOUND) with suppressed AsyncTaskException -> false
+    ApiException gaxNotFoundWithAsyncTask =
+        assertThrows(
+            ApiException.class,
+            () ->
+                ApiExceptions.callAndTranslateApiException(
+                    ApiFutures.immediateFailedFuture(
+                        createApiException(StatusCode.Code.NOT_FOUND))));
+    IOException wrappedGaxNotFound = new IOException("not found", gaxNotFoundWithAsyncTask);
+    try (GoogleHadoopFileSystem fs = createGhfsThrowingOnRenameAndDelete(wrappedGaxNotFound)) {
+      assertThat(fs.rename(src, dst)).isFalse();
+      assertThat(fs.delete(src, /* recursive= */ true)).isFalse();
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETED.getSymbol())).isEqualTo(0L);
+      assertThat(fs.getIOStatistics().counters().get(FILES_DELETE_REJECTED.getSymbol()))
+          .isEqualTo(0L);
+    }
+  }
+
+  private static GoogleHadoopFileSystem createGhfsThrowingOnRenameAndDelete(IOException failure)
+      throws IOException {
+    URI initUri = URI.create("gs://request-failure-test-bucket/");
+    GoogleCloudStorageFileSystem fakeGcsFs =
+        new GoogleCloudStorageFileSystemImpl(
+            InMemoryGoogleCloudStorage::new,
+            GoogleCloudStorageFileSystemOptions.builder()
+                .setCloudStorageOptions(getInMemoryGoogleCloudStorageOptions())
+                .build()) {
+          @Override
+          public void rename(URI src, URI dst) throws IOException {
+            throw failure;
+          }
+
+          @Override
+          public void delete(URI path, boolean recursive) throws IOException {
+            throw failure;
+          }
+        };
+    GoogleHadoopFileSystem fs = new GoogleHadoopFileSystem(fakeGcsFs);
+    fs.initialize(initUri, new Configuration());
+    return fs;
+  }
+
+  private static ApiException createApiException(StatusCode.Code code) {
+    StatusCode statusCode =
+        new StatusCode() {
+          @Override
+          public Code getCode() {
+            return code;
+          }
+
+          @Override
+          public Object getTransportCode() {
+            return code.getHttpStatusCode();
+          }
+        };
+    return new ApiException("gax " + code, /* cause= */ null, statusCode, /* retryable= */ false);
   }
 }

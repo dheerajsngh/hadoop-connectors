@@ -65,7 +65,6 @@ import com.google.cloud.hadoop.gcsio.UpdatableItemInfo;
 import com.google.cloud.hadoop.gcsio.UriPaths;
 import com.google.cloud.hadoop.util.AccessTokenProvider;
 import com.google.cloud.hadoop.util.AccessTokenProvider.AccessTokenType;
-import com.google.cloud.hadoop.util.ApiErrorExtractor;
 import com.google.cloud.hadoop.util.GoogleCloudStorageEventBus;
 import com.google.cloud.hadoop.util.HadoopCredentialsConfiguration;
 import com.google.cloud.hadoop.util.HadoopCredentialsConfiguration.AccessTokenProviderCredentials;
@@ -856,6 +855,8 @@ public class GoogleHadoopFileSystem extends FileSystem implements IOStatisticsSo
           checkArgument(src != null, "src must not be null");
           checkArgument(dst != null, "dst must not be null");
 
+          checkOpen();
+
           // Even though the underlying GCSFS will also throw an IAE if src is root, since our
           // filesystem
           // root happens to equal the global root, we want to explicitly check it here since
@@ -869,7 +870,7 @@ public class GoogleHadoopFileSystem extends FileSystem implements IOStatisticsSo
             renameInternal(src, dst);
           } catch (IOException e) {
             GoogleCloudStorageEventBus.postOnException();
-            if (ApiErrorExtractor.INSTANCE.requestFailure(e)) {
+            if (GhfsRequestFailures.isRequestFailure(e)) {
               throw e;
             }
             logger.atFiner().withCause(e).log("rename(src: %s, dst: %s): false [failed]", src, dst);
@@ -945,7 +946,7 @@ public class GoogleHadoopFileSystem extends FileSystem implements IOStatisticsSo
               throw e;
             } catch (IOException e) {
               GoogleCloudStorageEventBus.postOnException();
-              if (ApiErrorExtractor.INSTANCE.requestFailure(e)) {
+              if (GhfsRequestFailures.isRequestFailure(e)) {
                 throw e;
               }
               logger.atFiner().withCause(e).log(
@@ -955,10 +956,9 @@ public class GoogleHadoopFileSystem extends FileSystem implements IOStatisticsSo
             if (result) {
               logger.atFiner().log(
                   "delete(hadoopPath: %s, recursive: %b): true", hadoopPath, recursive);
+              incrementStatistic(GhfsStatistic.FILES_DELETED);
             }
             response = result;
-
-            incrementStatistic(GhfsStatistic.FILES_DELETED);
           } catch (IOException e) {
             GoogleCloudStorageEventBus.postOnException();
             incrementStatistic(GhfsStatistic.FILES_DELETE_REJECTED);
