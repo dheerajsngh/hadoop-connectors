@@ -879,13 +879,8 @@ public class GoogleCloudStorageClientImpl extends ForwardingGoogleCloudStorage
       blobTargetOptions.add(BlobTargetOption.generationMatch(dstContentGeneration));
     }
 
-    if (storageOptions.getEncryptionKey() != null) {
-      blobSourceOptions.add(
-          BlobSourceOption.decryptionKey(storageOptions.getEncryptionKey().value()));
-      blobTargetOptions.add(
-          BlobTargetOption.encryptionKey(storageOptions.getEncryptionKey().value()));
-    }
-
+    // GCS MoveObject is a metadata-only rename that preserves existing CSEK metadata in-place
+    // without reading CSEK headers (matching GoogleCloudStorageImpl.configureRequest).
     moveRequestBuilder.setSourceOptions(blobSourceOptions);
     moveRequestBuilder.setTargetOptions(blobTargetOptions);
 

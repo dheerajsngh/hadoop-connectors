@@ -24,11 +24,19 @@ import static com.google.cloud.hadoop.util.testing.MockHttpTransportHelper.mockT
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 import com.google.api.client.testing.http.MockHttpTransport;
 import com.google.api.gax.retrying.RetrySettings;
 import com.google.cloud.hadoop.util.ErrorTypeExtractor.ErrorType;
+import com.google.cloud.hadoop.util.RedactedString;
+import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.Storage.BlobSourceOption;
+import com.google.cloud.storage.Storage.BlobTargetOption;
+import com.google.cloud.storage.Storage.MoveBlobRequest;
 import com.google.cloud.storage.StorageException;
 import com.google.cloud.storage.StorageOptions;
 import com.google.common.collect.ImmutableList;
@@ -69,6 +77,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.mockito.ArgumentCaptor;
 
 /** Unit tests for {@link GoogleCloudStorageClientImpl} */
 @RunWith(JUnit4.class)
@@ -1028,6 +1037,130 @@ public class GoogleCloudStorageClientTest {
     assertThat(actualRequest.getIfSourceGenerationMatch()).isEqualTo(sourceGeneration);
     // Assert that destination generation condition was NOT set.
     assertThat(actualRequest.getIfGenerationMatch()).isEqualTo(0);
+  }
+
+  @Test
+  public void move_withCsekOptions_omitsEncryptionOptions() throws Exception {
+    String destinationObjectName = TEST_OBJECT_NAME + "-move";
+
+    mockStorage.addResponse(
+        TEST_OBJECT.toBuilder()
+            .setName(destinationObjectName)
+            .setGeneration(GENERATION + 1)
+            .setMetageneration(1L)
+            .build());
+
+    GoogleCloudStorageOptions csekOptions =
+        GoogleCloudStorageOptions.builder()
+            .setAppName("gcsio-unit-test")
+            .setProjectId("google.com:foo-project")
+            .setEncryptionAlgorithm("AES256")
+            .setEncryptionKey(RedactedString.create("CSX19s0epGWZP3h271Idu8xma2WhMuKT8ZisYfcjLM8="))
+            .setEncryptionKeyHash(
+                RedactedString.create("LpH4y6Bki5zIhYrjGo1J4BuSt12G/1B+n3FwORpdoyQ="))
+            .build();
+
+    Map<StorageResourceId, StorageResourceId> moveMap =
+        ImmutableMap.of(
+            TEST_RESOURCE_ID, new StorageResourceId(TEST_BUCKET_NAME, destinationObjectName));
+
+    ArgumentCaptor<MoveBlobRequest> requestCaptor = ArgumentCaptor.forClass(MoveBlobRequest.class);
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage);
+        Storage delegate = fakeServer.getGrpcStorageOptions().getService()) {
+      // GrpcStorageImpl is final; delegate interface mock to the FakeServer-backed Storage.
+      Storage storageSpy = mock(Storage.class, delegatesTo(delegate));
+      GoogleCloudStorage gcs = mockedGcsClientImpl(csekOptions, transport, storageSpy);
+      try {
+        gcs.move(moveMap);
+      } finally {
+        gcs.close();
+      }
+
+      verify(storageSpy).moveBlob(requestCaptor.capture());
+    }
+
+    MoveBlobRequest capturedRequest = requestCaptor.getValue();
+    assertThat(capturedRequest.getSource())
+        .isEqualTo(BlobId.of(TEST_BUCKET_NAME, TEST_OBJECT_NAME));
+    assertThat(capturedRequest.getTarget())
+        .isEqualTo(BlobId.of(TEST_BUCKET_NAME, destinationObjectName));
+    assertThat(capturedRequest.getSourceOptions()).isEmpty();
+    assertThat(capturedRequest.getTargetOptions()).isEmpty();
+
+    assertEquals(1, mockStorage.getRequests().size());
+    MoveObjectRequest actualRequest = (MoveObjectRequest) mockStorage.getRequests().get(0);
+    assertThat(actualRequest.getBucket()).contains(TEST_BUCKET_NAME);
+    assertThat(actualRequest.getSourceObject()).isEqualTo(TEST_OBJECT_NAME);
+    assertThat(actualRequest.getDestinationObject()).isEqualTo(destinationObjectName);
+    assertThat(actualRequest.hasIfSourceGenerationMatch()).isFalse();
+    assertThat(actualRequest.hasIfGenerationMatch()).isFalse();
+  }
+
+  @Test
+  public void move_withCsekOptionsAndGenerations_preservesOnlyGenerationOptions() throws Exception {
+    String destinationObjectName = TEST_OBJECT_NAME + "-move";
+    long sourceGeneration = 999L;
+    long destinationGeneration = 9876L;
+
+    mockStorage.addResponse(
+        TEST_OBJECT.toBuilder()
+            .setName(destinationObjectName)
+            .setGeneration(destinationGeneration + 1)
+            .setMetageneration(1L)
+            .build());
+
+    GoogleCloudStorageOptions csekOptions =
+        GoogleCloudStorageOptions.builder()
+            .setAppName("gcsio-unit-test")
+            .setProjectId("google.com:foo-project")
+            .setEncryptionAlgorithm("AES256")
+            .setEncryptionKey(RedactedString.create("CSX19s0epGWZP3h271Idu8xma2WhMuKT8ZisYfcjLM8="))
+            .setEncryptionKeyHash(
+                RedactedString.create("LpH4y6Bki5zIhYrjGo1J4BuSt12G/1B+n3FwORpdoyQ="))
+            .build();
+
+    StorageResourceId srcResourceIdWithGen =
+        new StorageResourceId(TEST_BUCKET_NAME, TEST_OBJECT_NAME, sourceGeneration);
+    StorageResourceId dstResourceIdWithGen =
+        new StorageResourceId(TEST_BUCKET_NAME, destinationObjectName, destinationGeneration);
+
+    Map<StorageResourceId, StorageResourceId> moveMap =
+        ImmutableMap.of(srcResourceIdWithGen, dstResourceIdWithGen);
+
+    ArgumentCaptor<MoveBlobRequest> requestCaptor = ArgumentCaptor.forClass(MoveBlobRequest.class);
+
+    try (FakeServer fakeServer = FakeServer.of(mockStorage);
+        Storage delegate = fakeServer.getGrpcStorageOptions().getService()) {
+      // GrpcStorageImpl is final; delegate interface mock to the FakeServer-backed Storage.
+      Storage storageSpy = mock(Storage.class, delegatesTo(delegate));
+      GoogleCloudStorage gcs = mockedGcsClientImpl(csekOptions, transport, storageSpy);
+      try {
+        gcs.move(moveMap);
+      } finally {
+        gcs.close();
+      }
+
+      verify(storageSpy).moveBlob(requestCaptor.capture());
+    }
+
+    MoveBlobRequest capturedRequest = requestCaptor.getValue();
+    assertThat(capturedRequest.getSource())
+        .isEqualTo(BlobId.of(TEST_BUCKET_NAME, TEST_OBJECT_NAME));
+    assertThat(capturedRequest.getTarget())
+        .isEqualTo(BlobId.of(TEST_BUCKET_NAME, destinationObjectName));
+    assertThat(capturedRequest.getSourceOptions())
+        .containsExactly(BlobSourceOption.generationMatch(sourceGeneration));
+    assertThat(capturedRequest.getTargetOptions())
+        .containsExactly(BlobTargetOption.generationMatch(destinationGeneration));
+
+    assertEquals(1, mockStorage.getRequests().size());
+    MoveObjectRequest actualRequest = (MoveObjectRequest) mockStorage.getRequests().get(0);
+    assertThat(actualRequest.getBucket()).contains(TEST_BUCKET_NAME);
+    assertThat(actualRequest.getSourceObject()).isEqualTo(TEST_OBJECT_NAME);
+    assertThat(actualRequest.getDestinationObject()).isEqualTo(destinationObjectName);
+    assertThat(actualRequest.getIfSourceGenerationMatch()).isEqualTo(sourceGeneration);
+    assertThat(actualRequest.getIfGenerationMatch()).isEqualTo(destinationGeneration);
   }
 
   @Test
