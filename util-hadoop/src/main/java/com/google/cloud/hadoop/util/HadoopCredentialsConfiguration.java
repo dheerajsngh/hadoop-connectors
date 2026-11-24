@@ -40,6 +40,7 @@ import java.time.Instant;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -399,6 +400,23 @@ public class HadoopCredentialsConfiguration {
     public AccessToken refreshAccessToken() throws IOException {
       accessTokenProvider.refresh();
       return convertAccessToken(accessTokenProvider.getAccessToken());
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (this == obj) {
+        return true;
+      }
+      if (!(obj instanceof AccessTokenProviderCredentials)) {
+        return false;
+      }
+      AccessTokenProviderCredentials other = (AccessTokenProviderCredentials) obj;
+      return super.equals(obj) && this.accessTokenProvider == other.accessTokenProvider;
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(super.hashCode(), System.identityHashCode(accessTokenProvider));
     }
   }
 

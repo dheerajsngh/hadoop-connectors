@@ -16,10 +16,13 @@
 
 package com.google.cloud.hadoop.gcsio;
 
-import com.google.auth.Credentials;
 import com.google.auto.value.AutoValue;
+import com.google.cloud.hadoop.util.AccessBoundary;
 import com.google.cloud.hadoop.util.AsyncWriteChannelOptions;
+import com.google.common.base.Equivalence;
 import com.google.common.collect.ImmutableMap;
+import java.util.List;
+import java.util.function.Function;
 import javax.annotation.Nullable;
 
 @AutoValue
@@ -32,12 +35,24 @@ public abstract class StorageClientProviderCacheKey {
   /** Whether tracing is requested. */
   public abstract boolean getIsTracingEnabled();
 
-  /** Credentials to use for the GCS client, otherwise null. */
+  /** Cache key for the GCS client credentials, or null if unauthenticated. */
   @Nullable
-  public abstract Credentials getCredentials();
+  public abstract CredentialCacheKey getCredentialCacheKey();
+
+  /**
+   * Identity-wrapped function providing downscoped access tokens for authenticating with the GCS
+   * backend, or null when downscoping is disabled.
+   */
+  @Nullable
+  public abstract Equivalence.Wrapper<Function<List<AccessBoundary>, String>>
+      getDownscopedAccessTokenFn();
 
   /** Whether downscoped tokens are used for authenticating with the GCS backend. */
-  public abstract boolean getIsDownScopingEnabled();
+  public boolean getIsDownScopingEnabled() {
+    Equivalence.Wrapper<Function<List<AccessBoundary>, String>> downscopedFn =
+        getDownscopedAccessTokenFn();
+    return downscopedFn != null && downscopedFn.get() != null;
+  }
 
   @Nullable
   public abstract ImmutableMap<String, String> getHttpHeaders();
@@ -56,24 +71,69 @@ public abstract class StorageClientProviderCacheKey {
 
   public abstract StorageClientProviderCacheKey.Builder toBuilder();
 
+  @Override
+  public final String toString() {
+    ImmutableMap<String, String> headers = getHttpHeaders();
+    Equivalence.Wrapper<Function<List<AccessBoundary>, String>> downscopedFn =
+        getDownscopedAccessTokenFn();
+    Function<List<AccessBoundary>, String> downscopedFnValue =
+        downscopedFn == null ? null : downscopedFn.get();
+    return "StorageClientProviderCacheKey{"
+        + "isTracingEnabled="
+        + getIsTracingEnabled()
+        + ", credentialCacheKey="
+        + getCredentialCacheKey()
+        + ", isDownScopingEnabled="
+        + getIsDownScopingEnabled()
+        + ", downscopedAccessTokenFnIdentity="
+        + (downscopedFnValue == null
+            ? "null"
+            : Integer.toHexString(System.identityHashCode(downscopedFnValue)))
+        + ", httpHeaderKeys="
+        + (headers == null ? "null" : headers.keySet())
+        + ", writeChannelOptions="
+        + getWriteChannelOptions()
+        + ", projectId="
+        + getProjectId()
+        + ", isDirectPathPreferred="
+        + getIsDirectPathPreferred()
+        + ", universeDomain="
+        + getUniverseDomain()
+        + "}";
+  }
+
   @AutoValue.Builder
   public abstract static class Builder {
     public abstract Builder setIsTracingEnabled(boolean value);
 
-    public abstract Builder setCredentials(Credentials value);
+    public abstract Builder setCredentialCacheKey(@Nullable CredentialCacheKey value);
 
-    public abstract Builder setIsDownScopingEnabled(boolean value);
+    @Nullable
+    abstract Equivalence.Wrapper<Function<List<AccessBoundary>, String>>
+        getDownscopedAccessTokenFn();
 
-    public abstract Builder setHttpHeaders(ImmutableMap<String, String> value);
+    public abstract Builder setDownscopedAccessTokenFn(
+        @Nullable Equivalence.Wrapper<Function<List<AccessBoundary>, String>> value);
 
-    public abstract Builder setWriteChannelOptions(AsyncWriteChannelOptions value);
+    public abstract Builder setHttpHeaders(@Nullable ImmutableMap<String, String> value);
 
-    public abstract Builder setProjectId(String value);
+    public abstract Builder setWriteChannelOptions(@Nullable AsyncWriteChannelOptions value);
+
+    public abstract Builder setProjectId(@Nullable String value);
 
     public abstract Builder setIsDirectPathPreferred(boolean value);
 
     public abstract Builder setUniverseDomain(@Nullable String value);
 
-    public abstract StorageClientProviderCacheKey build();
+    abstract StorageClientProviderCacheKey autoBuild();
+
+    public StorageClientProviderCacheKey build() {
+      Equivalence.Wrapper<Function<List<AccessBoundary>, String>> downscopedFn =
+          getDownscopedAccessTokenFn();
+      if (downscopedFn != null && downscopedFn.get() == null) {
+        setDownscopedAccessTokenFn(null);
+      }
+      return autoBuild();
+    }
   }
 }

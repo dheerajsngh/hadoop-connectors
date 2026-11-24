@@ -20,8 +20,11 @@ import static com.google.cloud.hadoop.gcsio.integration.GoogleCloudStorageTestHe
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 
+import com.google.cloud.hadoop.util.AccessBoundary;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
+import java.util.List;
+import java.util.function.Function;
 import javax.annotation.Nullable;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -30,6 +33,9 @@ import org.junit.runners.JUnit4;
 /** Tests for GoogleCloudStorageClientImpl caching. */
 @RunWith(JUnit4.class)
 public class GoogleCloudStorageJavaStorageClientCachingIntegrationTest {
+
+  private static final Function<List<AccessBoundary>, String> TEST_DOWNSCOPED_ACCESS_TOKEN_FN =
+      ignore -> "testDownscopedAccessToken";
 
   @Test
   public void reusesCachedStorageClient_cacheEnabled() throws IOException {
@@ -69,7 +75,7 @@ public class GoogleCloudStorageJavaStorageClientCachingIntegrationTest {
     return GoogleCloudStorageClientImpl.builder()
         .setOptions(optionsBuilder.build())
         .setCredentials(null)
-        .setDownscopedAccessTokenFn(ignore -> "testDownscopedAccessToken")
+        .setDownscopedAccessTokenFn(TEST_DOWNSCOPED_ACCESS_TOKEN_FN)
         .build();
   }
 }

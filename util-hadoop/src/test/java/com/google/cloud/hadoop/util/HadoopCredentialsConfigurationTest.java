@@ -43,6 +43,7 @@ import com.google.auth.oauth2.ExternalAccountCredentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.auth.oauth2.UserCredentials;
+import com.google.cloud.hadoop.util.HadoopCredentialsConfiguration.AccessTokenProviderCredentials;
 import com.google.cloud.hadoop.util.HadoopCredentialsConfiguration.AuthenticationType;
 import com.google.cloud.hadoop.util.testing.TestingAccessTokenProvider;
 import com.google.common.base.Suppliers;
@@ -222,6 +223,32 @@ public class HadoopCredentialsConfigurationTest {
     assertThat(accessToken.getTokenValue()).isEqualTo(TestingAccessTokenProvider.FAKE_ACCESS_TOKEN);
     assertThat(accessToken.getExpirationTime())
         .isEqualTo(Date.from(TestingAccessTokenProvider.EXPIRATION_TIME));
+  }
+
+  @Test
+  public void accessTokenProviderCredentials_distinctProvidersAreNotEqual() {
+    AccessTokenProvider provider1 = new TestingAccessTokenProvider();
+    AccessTokenProvider provider2 = new TestingAccessTokenProvider();
+
+    AccessTokenProviderCredentials creds1 = new AccessTokenProviderCredentials(provider1);
+    AccessTokenProviderCredentials creds2 = new AccessTokenProviderCredentials(provider2);
+
+    assertThat(creds1).isNotEqualTo(creds2);
+    assertThat(creds2).isNotEqualTo(creds1);
+    assertThat(creds1).isNotEqualTo(null);
+    assertThat(creds1).isNotEqualTo(GoogleCredentials.create(creds1.getAccessToken()));
+  }
+
+  @Test
+  public void accessTokenProviderCredentials_sameProviderInstanceAreEqualWithSameHashCode() {
+    AccessTokenProvider provider = new TestingAccessTokenProvider();
+
+    AccessTokenProviderCredentials creds1 = new AccessTokenProviderCredentials(provider);
+    AccessTokenProviderCredentials creds2 = new AccessTokenProviderCredentials(provider);
+
+    assertThat(creds1).isEqualTo(creds2);
+    assertThat(creds2).isEqualTo(creds1);
+    assertThat(creds1.hashCode()).isEqualTo(creds2.hashCode());
   }
 
   @Test

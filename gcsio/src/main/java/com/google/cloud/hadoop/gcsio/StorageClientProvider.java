@@ -26,6 +26,7 @@ import com.google.cloud.storage.GrpcStorageOptions;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Equivalence;
 import com.google.common.base.Strings;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -143,10 +144,13 @@ public class StorageClientProvider {
       GoogleCloudStorageOptions storageOptions,
       Function<List<AccessBoundary>, String> downscopedAccessTokenFn) {
     return StorageClientProviderCacheKey.builder()
-        .setCredentials(credentials)
+        .setCredentialCacheKey(CredentialCacheKey.of(credentials))
         .setHttpHeaders(storageOptions.getHttpRequestHeaders())
         .setIsDirectPathPreferred(storageOptions.isDirectPathPreferred())
-        .setIsDownScopingEnabled(downscopedAccessTokenFn != null)
+        .setDownscopedAccessTokenFn(
+            downscopedAccessTokenFn == null
+                ? null
+                : Equivalence.identity().wrap(downscopedAccessTokenFn))
         .setIsTracingEnabled(storageOptions.isTraceLogEnabled())
         .setWriteChannelOptions(storageOptions.getWriteChannelOptions())
         .setProjectId(storageOptions.getProjectId())
